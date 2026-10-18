@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { parseToolCalls, renderToolCalls } from '../../../src/core/tool-protocol.js';
+import { dsmlShape, parseToolCalls, renderToolCalls } from '../../../src/core/tool-protocol.js';
 
 const block = (...lines: string[]) => ['<｜DSML｜function_calls>', ...lines, '</｜DSML｜function_calls>'].join('\n');
 const invoke = (name: string, ...params: string[]) => [`<｜DSML｜invoke name="${name}">`, ...params, '</｜DSML｜invoke>'].join('\n');
@@ -84,5 +84,61 @@ describe('parseToolCalls', () => {
   it('non-string values are JSON', () => {
     expect(parseToolCalls(block(invoke('Read', param('file_path', '/a'), param('limit', '40', false), param('opts', '{"x":[1]}', false)))).calls)
       .toEqual([{ name: 'Read', input: { file_path: '/a', limit: 40, opts: { x: [1] } } }]);
+  });
+});
+
+// DeepSeek opens with the prompted `<｜DSML｜function_calls>`, then often switches to its own
+// `<｜｜DSML｜｜ …>` spelling and garbles the first tag after the opener (4 of 336 replies on 2026-10-18).
+describe('DeepSeek DSML drift seen in real sessions', () => {
+  const open = (tag: string) => `<｜｜DSML｜｜ ${tag}>`;
+  const close = (tag: string) => `</｜｜DSML｜｜ ${tag}>`;
+  const p = (key: string, value: string) => `${open(`parameter name="${key}" string="true"`)}${value}${close('parameter')}`;
+  const bash = (command: string) => [open('invoke name="Bash"'), p('command', command), close('invoke')];
+  const reply = (...lines: string[]) => ['<｜DSML｜function_calls>', ...lines, close('calls')].join('\n');
+
+  it('repeated calls opener', () => {
+    expect(parseToolCalls(reply(open('calls'), ...bash('pwd'))).calls)
+      .toEqual([{ name: 'Bash', input: { command: 'pwd' } }]);
+  });
+
+  it('invoke written as a parameter, then a doubled `parameter name="`', () => {
+    const garbled = [
+      `${open('parameter name="invoke" string="true"')}Bash${close('parameter')}`,
+      `${open('parameter name="parameter name="command" string="true"')}pwd${close('parameter')}`,
+      p('description', 'cwd'),
+      close('invoke'),
+    ];
+    expect(parseToolCalls(reply(...garbled, ...bash('ls'))).calls).toEqual([
+      { name: 'Bash', input: { command: 'pwd', description: 'cwd' } },
+      { name: 'Bash', input: { command: 'ls' } },
+    ]);
+  });
+
+  it('invoke opener prefixed with `parameter name="`', () => {
+    const garbled = [open('parameter name="invoke name="Bash"'), p('command', 'pwd'), close('invoke')];
+    expect(parseToolCalls(reply(...garbled, ...bash('ls'))).calls).toEqual([
+      { name: 'Bash', input: { command: 'pwd' } },
+      { name: 'Bash', input: { command: 'ls' } },
+    ]);
+  });
+
+  it('a block with no invoke is flagged malformed, not handed back as prose', () => {
+    const text = `Escribo el informe.\n${reply(p('file_path', '/tmp/r.html'), p('content', '<html></html>'), close('invoke'))}`;
+    expect(parseToolCalls(text)).toEqual({ text: 'Escribo el informe.', calls: [], malformed: true });
+  });
+
+  it('junk after a good invoke keeps the call and flags the block', () => {
+    expect(parseToolCalls(reply(...bash('pwd'), 'junk', ...bash('ls')))).toEqual({
+      text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,
+    });
+  });
+});
+
+describe('dsmlShape', () => {
+  it('keeps tags and identifier attributes, replaces everything else with lengths', () => {
+    const reply = `Escribo.\n${block(invoke('Write', param('file_path', '/home/u/secret.txt'), param('content', 'top secret')))}`;
+    const shape = dsmlShape(reply);
+    expect(shape).toBe('«9»<｜DSML｜function_calls>«1»<｜DSML｜invoke name="Write">«1»<｜DSML｜parameter name="file_path" string="true">«18»</｜DSML｜parameter>«1»<｜DSML｜parameter name="content" string="true">«10»</｜DSML｜parameter>«1»</｜DSML｜invoke>«1»</｜DSML｜function_calls>');
+    expect(dsmlShape('<｜DSML｜invoke name="rm -rf /">')).toBe('<｜DSML｜invoke name="…">');
   });
 });
