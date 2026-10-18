@@ -1,4 +1,5 @@
 import type { StreamEvent } from './stream.js';
+import { renderToolsPrompt } from './tool-protocol.js';
 
 export interface ProviderInfo {
   id: string;
@@ -76,7 +77,11 @@ export function extractText(content: string | unknown): string {
  * 3. Keep assistant messages for multi-turn context
  * 4. Return a clean prompt string
  */
-export function buildWebPrompt(messages: Message[]): string {
+export function buildWebPrompt(messages: Message[], tools?: ToolDef[]): string {
+  // Agent clients (Anthropic route, e.g. Claude Code) always pass `tools`, maybe empty.
+  // Every web request opens a fresh chat, so they need the whole transcript.
+  if (tools) return buildTranscript(messages, tools);
+
   const parts: string[] = [];
 
   for (const msg of messages) {
@@ -100,6 +105,25 @@ export function buildWebPrompt(messages: Message[]): string {
   // Return only the last user exchange (last user message + any preceding assistant)
   // to avoid sending the entire conversation history to web models
   return parts.length > 0 ? parts[parts.length - 1] : '';
+}
+
+function buildTranscript(messages: Message[], tools: ToolDef[]): string {
+  // Leading system messages form the header; later ones (Claude Code sends hook
+  // output and MCP instructions mid-conversation) stay where they were sent.
+  const firstTurn = messages.findIndex(m => m.role !== 'system');
+  const header = firstTurn < 0 ? messages : messages.slice(0, firstTurn);
+  const turns = firstTurn < 0 ? [] : messages.slice(firstTurn);
+  const system = header.map(m => extractText(m.content)).filter(Boolean).join('\n\n');
+  const parts: string[] = [];
+  if (system) parts.push(`<system>\n${system}\n</system>`);
+  if (tools.length) parts.push(renderToolsPrompt(tools));
+  parts.push('# Conversation');
+  for (const msg of turns) {
+    const text = extractText(msg.content);
+    if (text) parts.push(`[${msg.role}]\n${text}`);
+  }
+  parts.push('Continue as [assistant]: write only your next assistant message.');
+  return parts.join('\n\n');
 }
 
 /**
