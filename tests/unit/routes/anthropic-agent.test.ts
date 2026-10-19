@@ -4,6 +4,7 @@ import { BaseProvider, buildWebPrompt, type ChatRequest, type ModelInfo, type Pr
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { parseToolCalls } from '../../../src/core/tool-protocol.js';
 import { rateLimitPacing } from '../../../src/routes/anthropic-compat.js';
+import { encode } from 'gpt-tokenizer';
 
 // Shape of what DeepSeek Web emits when it decides to call a tool (DSML).
 const DSML_REPLY = [
@@ -353,28 +354,30 @@ describe('Anthropic route as Claude Code agent backend', () => {
   describe('usage', () => {
     const reply = 'Hola mundo, esto es una respuesta.';
     const thought = 'pienso un rato';
-    const tokens = (chars: number) => Math.ceil(chars / 4);
+    // Ground truth is a real BPE tokenizer, not the bridge's own heuristic, so the
+    // assertion measures the right TEXT and does not just mirror the implementation.
+    const within = (actual: number, text: string) => {
+      const real = encode(text).length;
+      expect(actual).toBeGreaterThanOrEqual(real * 0.8);
+      expect(actual).toBeLessThanOrEqual(real * 1.6);
+    };
 
     it('counts the prompt actually sent and the reply produced', async () => {
       const provider = new CapturingProvider(reply, thought);
       const body = await (await post(provider, false)).json();
       const sent = buildWebPrompt(provider.last!.messages, provider.last!.tools);
-      expect(body.usage).toMatchObject({
-        input_tokens: tokens(sent.length),
-        output_tokens: tokens(thought.length + reply.length),
-      });
+      within(body.usage.input_tokens, sent);
+      within(body.usage.output_tokens, thought + reply);
     });
+
 
     it('streaming carries input in message_start and output in message_delta', async () => {
       const provider = new CapturingProvider(reply, thought);
       const sse = await (await post(provider, true)).text();
       const data = (event: string) => JSON.parse(sse.split(`event: ${event}\ndata: `)[1].split('\n')[0]);
       const sent = buildWebPrompt(provider.last!.messages, provider.last!.tools);
-      expect(data('message_start').message.usage.input_tokens).toBe(tokens(sent.length));
-      expect(data('message_delta').usage).toMatchObject({
-        input_tokens: tokens(sent.length),
-        output_tokens: tokens(thought.length + reply.length),
-      });
+      within(data('message_start').message.usage.input_tokens, sent);
+      within(data('message_delta').usage.output_tokens, thought + reply);
     });
 
     it('count_tokens answers with the same prompt estimate and calls no provider', async () => {
@@ -385,6 +388,39 @@ describe('Anthropic route as Claude Code agent backend', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ input_tokens: chat.usage.input_tokens });
       expect(provider.last).toBeNull();
+    });
+
+    // Tool arguments are output tokens on the real API too.
+    // Regression: they were once stripped out of `prose` and went uncounted.
+    it('counts tool-call arguments as output tokens', async () => {
+      const big = 'x'.repeat(4000);
+      const reply = [
+        'Running.',
+        '<｜DSML｜function_calls>',
+        '<｜DSML｜invoke name="Bash">',
+        `<｜DSML｜parameter name="command" string="true">${big}</｜DSML｜parameter>`,
+        '</｜DSML｜invoke>',
+        '</｜DSML｜function_calls>',
+      ].join('\n');
+      const body = await (await post(new CapturingProvider(reply), false)).json();
+      expect(body.usage.output_tokens).toBeGreaterThanOrEqual(Math.ceil(reply.length / 4));
+    });
+
+    // chars/4 is a Latin heuristic and halves CJK.
+    it('counts CJK text at tokenizer density, not chars/4', async () => {
+      const reply = '你好世界'.repeat(50); // 200 chars
+      const real = encode(reply).length; // ground truth from a real BPE tokenizer
+      const body = await (await post(new CapturingProvider(reply), false)).json();
+      expect(body.usage.output_tokens).toBeGreaterThanOrEqual(real * 0.9);
+    });
+
+    // Claude Code sizes its context bar from the model list;
+    // without the window it falls back to its own default for a custom model id.
+    it('exposes the provider context window on the model list', async () => {
+      ctx = createTestContext({ providers: [new CapturingProvider('ok') as any] });
+      const body = await (await ctx.app.request('/v1/models')).json();
+      const m = body.data.find((x: any) => x.id === 'cap/m');
+      expect(m).toMatchObject({ max_input_tokens: 1, max_tokens: 1 });
     });
   });
 
