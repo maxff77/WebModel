@@ -153,7 +153,7 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
       // Step 5: Build prompt
-      const prompt = buildWebPrompt(req.messages);
+      const prompt = buildWebPrompt(req.messages, req.tools);
 
       const isThinking = req.model.includes('reasoner');
 
@@ -223,6 +223,7 @@ export class DeepSeekProvider extends BaseProvider {
       //   {"p":"response/thinking_content","o":"APPEND","v":"..."} — thinking
       const lines = (sseResult.data ?? '').split('\n');
       let lastPath = '';
+      let sawSnapshot = false;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('event:')) continue;
@@ -234,14 +235,34 @@ export class DeepSeekProvider extends BaseProvider {
         try {
           const parsed = JSON.parse(raw);
 
-          // Full response object (initial WIP state) — skip, wait for patches
-          if (parsed?.v?.response) continue;
+          // Full response object (initial WIP state). DeepSeek ships the first
+          // fragment already prefixed here and streams only the remainder as
+          // APPEND patches on response/fragments/<i>/content.
+          if (parsed?.v?.response) {
+            if (!sawSnapshot) {
+              sawSnapshot = true;
+              const frags = parsed.v.response.fragments;
+              const last = Array.isArray(frags) ? frags[frags.length - 1] : undefined;
+              if (typeof last?.content === 'string' && last.content.length > 0) {
+                yield { type: 'text_delta', delta: last.content };
+              }
+            }
+            continue;
+          }
+
+          // `event: hint` reports server-side refusals, e.g. when requests come too fast:
+          // {"type":"error","content":"Messages too frequent...","finish_reason":"rate_limit_reached"}
+          if (parsed?.type === 'error' && typeof parsed.content === 'string') {
+            const code = parsed.finish_reason === 'rate_limit_reached' ? 'upstream_rate_limit' : parsed.finish_reason;
+            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code };
+            continue;
+          }
 
           const path = parsed.p ?? lastPath;
           if (parsed.p) lastPath = parsed.p;
           const value = parsed.v;
 
-          if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
+          if (/^response\/(content|fragments\/-?\d+\/content)$/.test(path) && typeof value === 'string' && value.length > 0) {
             yield { type: 'text_delta', delta: value };
           } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'thinking_delta', delta: value };

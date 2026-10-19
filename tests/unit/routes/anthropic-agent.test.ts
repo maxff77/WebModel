@@ -1,0 +1,229 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import { createTestContext, type TestContext } from '../../helpers/test-server.js';
+import { BaseProvider, buildWebPrompt, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
+import type { StreamEvent } from '../../../src/core/stream.js';
+import { parseToolCalls } from '../../../src/core/tool-protocol.js';
+
+// Shape of what DeepSeek Web emits when it decides to call a tool (DSML).
+const DSML_REPLY = [
+  'Voy a ver el directorio.',
+  '<｜DSML｜function_calls>',
+  '<｜DSML｜invoke name="Bash">',
+  '<｜DSML｜parameter name="command" string="true">pwd</｜DSML｜parameter>',
+  '<｜DSML｜parameter name="description" string="true">Print cwd</｜DSML｜parameter>',
+  '</｜DSML｜invoke>',
+  '</｜DSML｜function_calls>',
+].join('\n');
+
+class CapturingProvider extends BaseProvider {
+  readonly info: ProviderInfo = {
+    id: 'cap', name: 'Cap', website: 'https://x', loginUrl: 'https://x', needsBrowser: false,
+  };
+  last: ChatRequest | null = null;
+  constructor(private reply: string) { super(); }
+  async login() {}
+  async isAuthenticated() { return true; }
+  async detectLoginComplete() { return true; }
+  async models(): Promise<ModelInfo[]> { return [{ id: 'm', name: 'm', contextWindow: 1, maxOutput: 1 }]; }
+  async *chat(req: ChatRequest): AsyncIterable<StreamEvent> {
+    this.last = req;
+    yield { type: 'text_delta', delta: this.reply };
+    yield { type: 'done', reason: 'stop' };
+  }
+}
+
+// Minimal Claude Code-shaped request: system blocks, tools, and a prior tool round trip.
+const claudeCodeBody = (stream: boolean) => ({
+  model: 'cap/m',
+  max_tokens: 1024,
+  stream,
+  system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
+  tools: [{
+    name: 'Bash',
+    description: 'Executes a bash command',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' }, description: { type: 'string' } },
+      required: ['command'],
+    },
+  }],
+  messages: [
+    { role: 'user', content: [
+      { type: 'text', text: '<system-reminder>gitStatus: branch feat/x</system-reminder>' },
+      { type: 'text', text: 'list files' },
+    ] },
+    { role: 'assistant', content: [
+      { type: 'text', text: 'Listing.' },
+      { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } },
+    ] },
+    { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'toolu_1', content: 'README.md\npackage.json' },
+    ] },
+  ],
+});
+
+describe('Anthropic route as Claude Code agent backend', () => {
+  let ctx: TestContext;
+  afterEach(() => ctx?.cleanup());
+
+  async function post(provider: CapturingProvider, stream: boolean) {
+    ctx = createTestContext({ providers: [provider as any] });
+    return ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(stream)),
+    });
+  }
+
+  it('prompt sent to the web model keeps system, tools and full history', async () => {
+    const provider = new CapturingProvider('ok');
+    await post(provider, false);
+    const prompt = buildWebPrompt(provider.last!.messages, provider.last!.tools);
+    expect(prompt).toContain("You are Claude Code");   // system prompt
+    expect(prompt).toContain('Bash');                  // tool definition
+    expect(prompt).toContain('list files');            // earlier user turn
+    expect(prompt).toContain('README.md');             // tool_result
+  });
+
+  it('non-stream: DSML tool call becomes a tool_use block', async () => {
+    const res = await post(new CapturingProvider(DSML_REPLY), false);
+    const body = await res.json();
+    const toolUse = body.content.find((b: any) => b.type === 'tool_use');
+    expect(toolUse).toMatchObject({ name: 'Bash', input: { command: 'pwd', description: 'Print cwd' } });
+    expect(body.stop_reason).toBe('tool_use');
+    expect(JSON.stringify(body.content)).not.toContain('DSML');
+  });
+
+  it('parses the DSML variant seen in a real Claude Code session', async () => {
+    const reply = [
+      'I\'ll start by exploring.',
+      '<｜｜DSML｜｜ calls>',
+      '<｜｜DSML｜｜ invoke name="Bash">',
+      '<｜｜DSML｜｜ parameter name="command" string="true">ls -la; pwd</｜｜DSML｜｜ parameter>',
+      '</｜｜DSML｜｜ invoke>',
+      '<｜｜DSML｜｜ invoke name="Read">',
+      '<｜｜DSML｜｜ parameter name="limit" string="false">40</｜｜DSML｜｜ parameter>',
+      '</｜｜DSML｜｜ invoke>',
+      '</｜｜DSML｜｜ calls>',
+    ].join('\n');
+    const body = await (await post(new CapturingProvider(reply), false)).json();
+    expect(body.content.map((b: any) => b.type)).toEqual(['text', 'tool_use', 'tool_use']);
+    expect(body.content[1].input).toEqual({ command: 'ls -la; pwd' });
+    expect(body.content[2].input).toEqual({ limit: 40 });
+  });
+
+  it('recovers a parameter whose opening tag lost `parameter name="` (seen from DeepSeek)', () => {
+    // Verbatim model output captured through the bridge.
+    const raw = '<｜DSML｜function_calls>\n<｜DSML｜invoke name="Read">\n'
+      + '<｜DSML｜file_path" string="true">/repo/src/a.ts</｜DSML｜parameter>\n'
+      + '<｜DSML｜parameter name="offset" string="false">18</｜｜DSML｜｜ parameter>\n'
+      + '</｜DSML｜invoke>\n</｜DSML｜function_calls>';
+    expect(parseToolCalls(raw).calls).toEqual([{ name: 'Read', input: { file_path: '/repo/src/a.ts', offset: 18 } }]);
+  });
+
+  it('reply cut off inside a tool call becomes max_tokens so Claude Code asks for smaller pieces', async () => {
+    // Shape of a real DeepSeek reply truncated by its output limit while writing a big file.
+    const cut = 'Writing report.\n\n<｜DSML｜function_calls>\n<｜DSML｜invoke name="Write">\n'
+      + '<｜｜DSML｜｜ parameter name="file_path" string="true">/tmp/r.html</｜｜DSML｜｜ parameter>\n'
+      + '<｜｜DSML｜｜ parameter name="content" string="true"><!doctype html><p class="';
+    expect(parseToolCalls(cut)).toEqual({ text: 'Writing report.', calls: [], truncated: true });
+    for (const stream of [false, true]) {
+      const res = await post(new CapturingProvider(cut), stream);
+      const text = stream ? await res.text() : JSON.stringify(await res.json());
+      expect(text).toContain('"max_tokens"');
+      expect(text).toContain('Writing report.');
+      expect(text).not.toContain('DSML');
+    }
+  });
+
+  it('keeps mid-conversation system messages in place (Claude Code hooks, MCP instructions)', async () => {
+    const provider = new CapturingProvider('ok');
+    ctx = createTestContext({ providers: [provider as any] });
+    await ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'cap/m', max_tokens: 64, system: 'TOP-SYSTEM', tools: [],
+        messages: [
+          { role: 'user', content: 'Q1' },
+          { role: 'system', content: 'HOOK-CTX' },
+          { role: 'assistant', content: 'A1' },
+          { role: 'user', content: 'Q2' },
+        ],
+      }),
+    });
+    const prompt = buildWebPrompt(provider.last!.messages, provider.last!.tools);
+    const header = prompt.slice(0, prompt.indexOf('# Conversation'));
+    expect(header).toContain('TOP-SYSTEM');
+    expect(header).not.toContain('HOOK-CTX');
+    const at = (s: string) => prompt.indexOf(s);
+    expect(at('Q1')).toBeLessThan(at('HOOK-CTX'));
+    expect(at('HOOK-CTX')).toBeLessThan(at('A1'));
+  });
+
+  it('retries a transient provider error once', async () => {
+    let calls = 0;
+    const flaky = new CapturingProvider('recovered');
+    flaky.chat = async function* () {
+      if (calls++ === 0) { yield { type: 'error', message: 'page.evaluate: Execution context was destroyed' }; return; }
+      yield { type: 'text_delta', delta: 'recovered' };
+      yield { type: 'done', reason: 'stop' };
+    };
+    const body = await (await post(flaky, false)).json();
+    expect(calls).toBe(2);
+    expect(body.content[0].text).toBe('recovered');
+  });
+
+  it('persistent provider error is an API error Claude Code can retry, not assistant text', async () => {
+    const broken = new CapturingProvider('');
+    broken.chat = async function* () { yield { type: 'error', message: 'boom' }; };
+    for (const stream of [true, false]) {
+      const res = await post(broken, stream);
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'api_error', message: 'boom' } });
+    }
+  });
+
+  it('upstream rate limit becomes a 429 rate_limit_error without an immediate retry', async () => {
+    let calls = 0;
+    const limited = new CapturingProvider('');
+    limited.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
+    };
+    const res = await post(limited, true);
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'rate_limit_error' } });
+    expect(calls).toBe(1);
+  });
+
+  it('serializes concurrent requests to the same provider (one shared browser tab)', async () => {
+    let active = 0, maxActive = 0;
+    const slow = new CapturingProvider('ok');
+    slow.chat = async function* () {
+      maxActive = Math.max(maxActive, ++active);
+      await new Promise(r => setTimeout(r, 20));
+      active--;
+      yield { type: 'text_delta', delta: 'ok' };
+      yield { type: 'done', reason: 'stop' };
+    };
+    ctx = createTestContext({ providers: [slow as any] });
+    const req = () => ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(false)),
+    });
+    const results = await Promise.all([req(), req(), req()]);
+    expect(results.map(r => r.status)).toEqual([200, 200, 200]);
+    expect(maxActive).toBe(1);
+  });
+
+  it('stream: DSML tool call becomes tool_use SSE events', async () => {
+    const res = await post(new CapturingProvider(DSML_REPLY), true);
+    const text = await res.text();
+    expect(text).toContain('"type":"tool_use"');
+    expect(text).toContain('"input_json_delta"');
+    expect(text).toContain('"stop_reason":"tool_use"');
+    expect(text).not.toContain('DSML');
+  });
+});

@@ -1,11 +1,15 @@
 import type { StreamEvent } from './stream.js';
 
+export type AnthropicContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> };
+
 interface AnthropicMessage {
   id: string;
   type: 'message';
   role: 'assistant';
   model: string;
-  content: Array<{ type: 'text'; text: string }>;
+  content: AnthropicContentBlock[];
   stop_reason: string | null;
   stop_sequence: string | null;
   usage: { input_tokens: number; output_tokens: number };
@@ -14,15 +18,16 @@ interface AnthropicMessage {
 export function formatAnthropicNonStream(
   msgId: string,
   model: string,
-  content: string,
+  content: AnthropicContentBlock[],
+  stopReason = 'end_turn',
 ): AnthropicMessage {
   return {
     id: msgId,
     type: 'message',
     role: 'assistant',
     model,
-    content: [{ type: 'text', text: content }],
-    stop_reason: 'end_turn',
+    content,
+    stop_reason: stopReason,
     stop_sequence: null,
     usage: { input_tokens: 0, output_tokens: 0 },
   };
@@ -47,12 +52,11 @@ export function formatMessageStart(msgId: string, model: string): string {
   return `event: message_start\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-export function formatContentBlockStart(index: number): string {
-  const data = {
-    type: 'content_block_start',
-    index,
-    content_block: { type: 'text', text: '' },
-  };
+export function formatContentBlockStart(
+  index: number,
+  block: AnthropicContentBlock = { type: 'text', text: '' },
+): string {
+  const data = { type: 'content_block_start', index, content_block: block };
   return `event: content_block_start\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
@@ -61,6 +65,15 @@ export function formatContentBlockDelta(index: number, text: string): string {
     type: 'content_block_delta',
     index,
     delta: { type: 'text_delta', text },
+  };
+  return `event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+export function formatInputJsonDelta(index: number, partialJson: string): string {
+  const data = {
+    type: 'content_block_delta',
+    index,
+    delta: { type: 'input_json_delta', partial_json: partialJson },
   };
   return `event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`;
 }
