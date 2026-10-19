@@ -138,6 +138,16 @@ describe('DeepSeek DSML drift seen in real sessions', () => {
     expect(parseToolCalls(text)).toEqual({ text: 'Checking the DB.', calls: [], malformed: true });
   });
 
+  // Seen from DeepSeek on 2026-10-19: every invoke closed, only the block closer broken.
+  // Nothing call-shaped follows, so no call can be lost; asking again only doubled the load.
+  it('closed invokes with a broken block closer are complete, not malformed', () => {
+    const calls = [{ name: 'Bash', input: { command: 'pwd' } }, { name: 'Bash', input: { command: 'ls' } }];
+    for (const closer of ['<｜DSML｜function_calls>', '\n</function_calls>', '']) {
+      expect(parseToolCalls(['<｜DSML｜function_calls>', ...bash('pwd'), ...bash('ls'), closer].join('\n')))
+        .toEqual({ text: '', calls });
+    }
+  });
+
   it('junk after a good invoke keeps the call and flags the block', () => {
     expect(parseToolCalls(reply(...bash('pwd'), 'junk', ...bash('ls')))).toEqual({
       text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,

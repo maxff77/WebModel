@@ -36,6 +36,7 @@ const RE_VALUE_END = new RegExp(
 // with a parameter, `<｜DSML｜function_calls｜parameter name=`) are flagged, not shown as prose.
 const RE_BLOCK_START = new RegExp(`<${P}\\w`, 'g');
 const RE_ANY_CLOSE = new RegExp(`${INVOKE_CLOSE}|${CALLS_CLOSE}`);
+const RE_CALL_SHAPED = new RegExp(`<${P}(?:parameter|invoke)`);
 
 function parseJson(v: string): unknown {
   try { return JSON.parse(v); } catch { return v; }
@@ -69,6 +70,7 @@ function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: b
     return m;
   };
   while (take(RE_CALLS_OPEN)); // DeepSeek sometimes repeats the opener
+  let invokeClosed = false;
   for (let invoke; (invoke = take(RE_INVOKE_OPEN)); ) {
     const input = new Map<string, unknown>();
     for (let param; (param = take(RE_PARAM_OPEN)); ) {
@@ -80,9 +82,13 @@ function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: b
       pos = RE_VALUE_END.lastIndex;
     }
     calls.push({ name: invoke[1] ?? invoke[2], input: Object.fromEntries(input) });
-    if (!take(RE_INVOKE_CLOSE)) break; // missing closer is tolerated, but ends the block
+    invokeClosed = !!take(RE_INVOKE_CLOSE);
+    if (!invokeClosed) break; // missing closer is tolerated, but ends the block
   }
-  const closed = !!take(RE_CALLS_CLOSE) || pos === text.length;
+  // Every invoke closed and nothing call-shaped follows: a broken block closer
+  // (DeepSeek repeats the opener or drops the DSML prefix) cannot hide a call.
+  const closed = !!take(RE_CALLS_CLOSE) || pos === text.length
+    || (invokeClosed && !RE_CALL_SHAPED.test(text.slice(pos)));
   return { calls, cut: false, malformed: !closed };
 }
 
