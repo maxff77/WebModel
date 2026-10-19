@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createTestContext, type TestContext } from '../../helpers/test-server.js';
-import { BaseProvider, buildWebPrompt, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
+import { BaseProvider, buildWebPrompt, estimateTokens, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { parseToolCalls } from '../../../src/core/tool-protocol.js';
 import { rateLimitPacing } from '../../../src/routes/anthropic-compat.js';
@@ -378,6 +378,11 @@ describe('Anthropic route as Claude Code agent backend', () => {
       const sent = buildWebPrompt(provider.last!.messages, provider.last!.tools);
       within(data('message_start').message.usage.input_tokens, sent);
       within(data('message_delta').usage.output_tokens, thought + reply);
+    });
+
+    // Hangul is CJK for tokenizer purposes; chars/4 halves it like Chinese.
+    it('counts Hangul syllables at the CJK rate', () => {
+      expect(estimateTokens('가'.repeat(200))).toBe(120);
     });
 
     it('count_tokens answers with the same prompt estimate and calls no provider', async () => {

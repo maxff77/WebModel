@@ -52,10 +52,10 @@ export abstract class BaseProvider {
 }
 
 // Script-aware estimate: Latin runs ~0.3 tokens per char (chars/4 is within 20%
-// of a real BPE tokenizer), but CJK is ~0.6 per char, so chars/4 halved every
-// Chinese reply and Claude Code's meter read half the cost.
+// of a real BPE tokenizer), but CJK and Hangul are ~0.6 per char, so chars/4
+// halved every Chinese or Korean reply and Claude Code's meter read half the cost.
 // ponytail: heuristic, not a tokenizer; swap in one if the count must be exact.
-const CJK = /[　-鿿豈-﫿＀-￯]/g;
+const CJK = /[\u1100-\u11FF\u3000-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]/g;
 export const estimateTokens = (...texts: string[]): number =>
   Math.ceil(texts.reduce((n, t) => {
     const cjk = t.match(CJK)?.length ?? 0;
