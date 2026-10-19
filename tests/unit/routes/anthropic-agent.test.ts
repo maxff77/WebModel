@@ -21,13 +21,14 @@ class CapturingProvider extends BaseProvider {
     id: 'cap', name: 'Cap', website: 'https://x', loginUrl: 'https://x', needsBrowser: false,
   };
   last: ChatRequest | null = null;
-  constructor(private reply: string) { super(); }
+  constructor(private reply: string, private thought = '') { super(); }
   async login() {}
   async isAuthenticated() { return true; }
   async detectLoginComplete() { return true; }
   async models(): Promise<ModelInfo[]> { return [{ id: 'm', name: 'm', contextWindow: 1, maxOutput: 1 }]; }
   async *chat(req: ChatRequest): AsyncIterable<StreamEvent> {
     this.last = req;
+    if (this.thought) yield { type: 'thinking_delta', delta: this.thought };
     yield { type: 'text_delta', delta: this.reply };
     yield { type: 'done', reason: 'stop' };
   }
@@ -68,12 +69,12 @@ describe('Anthropic route as Claude Code agent backend', () => {
   const pacing = { ...rateLimitPacing };
   afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitPacing, pacing); });
 
-  async function post(provider: CapturingProvider, stream: boolean) {
+  async function post(provider: CapturingProvider, stream: boolean, extra: object = {}, path = '/v1/messages') {
     ctx = createTestContext({ providers: [provider as any] });
-    return ctx.app.request('/v1/messages', {
+    return ctx.app.request(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(claudeCodeBody(stream)),
+      body: JSON.stringify({ ...claudeCodeBody(stream), ...extra }),
     });
   }
 
@@ -85,6 +86,25 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(prompt).toContain('Bash');                  // tool definition
     expect(prompt).toContain('list files');            // earlier user turn
     expect(prompt).toContain('README.md');             // tool_result
+  });
+
+  it('history numbers calls in order and each result carries its call number', async () => {
+    const provider = new CapturingProvider('ok');
+    const read = (id: string) => ({ type: 'tool_use', id, name: 'Read', input: { file_path: '/a' } });
+    const result = (id: string, content: string) => ({ type: 'tool_result', tool_use_id: id, content });
+    await post(provider, false, { messages: [
+      ...claudeCodeBody(false).messages,
+      { role: 'assistant', content: [read('toolu_2'), read('toolu_3')] },
+      { role: 'user', content: [result('toolu_3', 'second'), result('toolu_2', 'first')] },
+    ] });
+    const prompt = buildWebPrompt(provider.last!.messages, provider.last!.tools);
+    expect(prompt).toContain('<｜DSML｜invoke name="Bash" call="1">');
+    expect(prompt).toContain('<｜DSML｜invoke name="Read" call="2">');
+    expect(prompt).toContain('<｜DSML｜invoke name="Read" call="3">');
+    expect(prompt).toContain('<tool_result call="1" name="Bash">\nREADME.md');
+    expect(prompt).toContain('<tool_result call="3" name="Read">\nsecond');
+    expect(prompt).toContain('<tool_result call="2" name="Read">\nfirst');
+    expect(prompt).not.toContain('toolu_');
   });
 
   it('non-stream: DSML tool call becomes a tool_use block', async () => {
@@ -246,6 +266,85 @@ describe('Anthropic route as Claude Code agent backend', () => {
     const body = await (await post(provider, false)).json();
     expect(body.stop_reason).toBe('max_tokens');
     expect(body.content).toEqual([{ type: 'text', text: 'Voy a mirar.' }]);
+  });
+
+  it('a model no provider has (subagents send claude-sonnet-5-5) uses the configured fallback', async () => {
+    const provider = new CapturingProvider('ok');
+    ctx = createTestContext({ providers: [provider as any], fallbackModel: 'cap/m' });
+    const res = await ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...claudeCodeBody(false), model: 'claude-sonnet-5-5' }),
+    });
+    expect(res.status).toBe(200);
+    expect(provider.last?.model).toBe('m');
+  });
+
+  describe('thinking', () => {
+    const thought = 'Primero reviso el directorio.';
+
+    it('reasoning becomes a thinking block ahead of the text, not part of the text', async () => {
+      const body = await (await post(new CapturingProvider(DSML_REPLY, thought), false)).json();
+      expect(body.content.map((b: any) => b.type)).toEqual(['thinking', 'text', 'tool_use']);
+      expect(body.content[0]).toMatchObject({ type: 'thinking', thinking: thought });
+      expect(body.content[1].text).not.toContain(thought);
+    });
+
+    it('streams the thinking block (thinking_delta) before the text block', async () => {
+      const sse = await (await post(new CapturingProvider('Hecho.', thought), true)).text();
+      expect(sse).toContain('"type":"thinking_delta"');
+      expect(sse).toContain(thought);
+      expect(sse.indexOf('"type":"thinking"')).toBeLessThan(sse.indexOf('"type":"text_delta"'));
+    });
+
+    it.each([
+      [{ type: 'enabled', budget_tokens: 2048 }, true],
+      [{ type: 'adaptive' }, true],
+      [{ type: 'disabled' }, false],
+      [undefined, false],
+    ])('request thinking=%j reaches the provider as %s', async (thinking, want) => {
+      const provider = new CapturingProvider('ok');
+      await post(provider, false, { thinking });
+      expect(!!provider.last?.thinking).toBe(want);
+    });
+  });
+
+  describe('usage', () => {
+    const reply = 'Hola mundo, esto es una respuesta.';
+    const thought = 'pienso un rato';
+    const tokens = (chars: number) => Math.ceil(chars / 4);
+
+    it('counts the prompt actually sent and the reply produced', async () => {
+      const provider = new CapturingProvider(reply, thought);
+      const body = await (await post(provider, false)).json();
+      const sent = buildWebPrompt(provider.last!.messages, provider.last!.tools);
+      expect(body.usage).toMatchObject({
+        input_tokens: tokens(sent.length),
+        output_tokens: tokens(thought.length + reply.length),
+      });
+    });
+
+    it('streaming carries input in message_start and output in message_delta', async () => {
+      const provider = new CapturingProvider(reply, thought);
+      const sse = await (await post(provider, true)).text();
+      const data = (event: string) => JSON.parse(sse.split(`event: ${event}\ndata: `)[1].split('\n')[0]);
+      const sent = buildWebPrompt(provider.last!.messages, provider.last!.tools);
+      expect(data('message_start').message.usage.input_tokens).toBe(tokens(sent.length));
+      expect(data('message_delta').usage).toMatchObject({
+        input_tokens: tokens(sent.length),
+        output_tokens: tokens(thought.length + reply.length),
+      });
+    });
+
+    it('count_tokens answers with the same prompt estimate and calls no provider', async () => {
+      const provider = new CapturingProvider(reply);
+      const chat = await (await post(provider, false)).json();
+      provider.last = null;
+      const res = await post(provider, false, {}, '/v1/messages/count_tokens');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ input_tokens: chat.usage.input_tokens });
+      expect(provider.last).toBeNull();
+    });
   });
 
   it('serializes concurrent requests to the same provider (one shared browser tab)', async () => {

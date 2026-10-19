@@ -155,7 +155,7 @@ export class DeepSeekProvider extends BaseProvider {
       // Step 5: Build prompt
       const prompt = buildWebPrompt(req.messages, req.tools);
 
-      const isThinking = req.model.includes('reasoner');
+      const isThinking = req.thinking || req.model.includes('reasoner');
 
       // Step 6: Send message with PoW header, read SSE
       const sseResult = await page.evaluate(async (args: {
