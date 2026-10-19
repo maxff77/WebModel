@@ -3,6 +3,7 @@ import { createTestContext, type TestContext } from '../../helpers/test-server.j
 import { BaseProvider, buildWebPrompt, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { parseToolCalls } from '../../../src/core/tool-protocol.js';
+import { rateLimitPacing } from '../../../src/routes/anthropic-compat.js';
 
 // Shape of what DeepSeek Web emits when it decides to call a tool (DSML).
 const DSML_REPLY = [
@@ -64,7 +65,8 @@ const claudeCodeBody = (stream: boolean) => ({
 
 describe('Anthropic route as Claude Code agent backend', () => {
   let ctx: TestContext;
-  afterEach(() => ctx?.cleanup());
+  const pacing = { ...rateLimitPacing };
+  afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitPacing, pacing); });
 
   async function post(provider: CapturingProvider, stream: boolean) {
     ctx = createTestContext({ providers: [provider as any] });
@@ -184,7 +186,8 @@ describe('Anthropic route as Claude Code agent backend', () => {
     }
   });
 
-  it('upstream rate limit becomes a 429 rate_limit_error without an immediate retry', async () => {
+  it('persistent rate limit becomes a 429 rate_limit_error once the cooldown budget is spent', async () => {
+    Object.assign(rateLimitPacing, { firstWaitMs: 10, maxWaitMs: 25 });
     let calls = 0;
     const limited = new CapturingProvider('');
     limited.chat = async function* () {
@@ -194,7 +197,55 @@ describe('Anthropic route as Claude Code agent backend', () => {
     const res = await post(limited, true);
     expect(res.status).toBe(429);
     expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'rate_limit_error' } });
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  it('rate limit holds the provider lane and retries after a cooldown, so parallel subagents all succeed', async () => {
+    Object.assign(rateLimitPacing, { firstWaitMs: 30, maxWaitMs: 1_000 });
+    const starts: number[] = [];
+    const deepseek = new CapturingProvider('ok');
+    deepseek.chat = async function* () {
+      starts.push(performance.now());
+      if (starts.length <= 2) { yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' }; return; }
+      yield { type: 'text_delta', delta: 'ok' };
+      yield { type: 'done', reason: 'stop' };
+    };
+    ctx = createTestContext({ providers: [deepseek as any] });
+    const req = () => ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(false)),
+    });
+    const results = await Promise.all([req(), req(), req()]);
+    expect(results.map(r => r.status)).toEqual([200, 200, 200]);
+    expect(starts).toHaveLength(5);
+    // No request reached the provider during a cooldown (30 ms, then 60 ms).
+    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(25);
+    expect(starts[2] - starts[1]).toBeGreaterThanOrEqual(55);
+  });
+
+  it('a garbled tool-call block is asked again instead of ending the turn', async () => {
+    const garbled = ['<｜DSML｜function_calls>',
+      '<｜｜DSML｜｜ parameter name="command" string="true">pwd</｜｜DSML｜｜ parameter>',
+      '</｜｜DSML｜｜ invoke>', '</｜｜DSML｜｜ calls>'].join('\n');
+    const replies = [garbled, DSML_REPLY];
+    const provider = new CapturingProvider('');
+    provider.chat = async function* () {
+      yield { type: 'text_delta', delta: replies.shift() ?? garbled };
+      yield { type: 'done', reason: 'stop' };
+    };
+    const body = await (await post(provider, false)).json();
+    expect(replies).toEqual([]);
+    expect(body.stop_reason).toBe('tool_use');
+    expect(body.content.at(-1)).toMatchObject({ type: 'tool_use', name: 'Bash', input: { command: 'pwd' } });
+  });
+
+  it('garbled twice: the block is dropped and max_tokens makes Claude Code continue', async () => {
+    const provider = new CapturingProvider(['Voy a mirar.', '<｜DSML｜function_calls>',
+      '<｜｜DSML｜｜ parameter name="command" string="true">pwd</｜｜DSML｜｜ parameter>', '</｜｜DSML｜｜ calls>'].join('\n'));
+    const body = await (await post(provider, false)).json();
+    expect(body.stop_reason).toBe('max_tokens');
+    expect(body.content).toEqual([{ type: 'text', text: 'Voy a mirar.' }]);
   });
 
   it('serializes concurrent requests to the same provider (one shared browser tab)', async () => {

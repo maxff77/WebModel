@@ -14,12 +14,17 @@ export interface ParsedToolCall {
 const P = '[｜|]+\\s*DSML\\s*[｜|]+\\s*';
 const CALLS_CLOSE = `</${P}(?:function_)?calls\\s*>`;
 const INVOKE_CLOSE = `</${P}invoke\\s*>`;
-// `parameter name="` is optional: DeepSeek sometimes emits `<｜DSML｜file_path" string="true">`.
-const PARAM_START = `<${P}(?:parameter\\s+name=")?`;
+// `parameter name="` is optional (`<｜DSML｜file_path" string="true">`) or doubled
+// (`parameter name="parameter name="command"`): both seen from DeepSeek.
+const PARAM_START = `<${P}(?:parameter\\s+name=")*`;
 // Sticky patterns, matched by the scanner at its current position.
 const RE_CALLS_OPEN = new RegExp(`<${P}(?:function_)?calls\\s*>`, 'y');
-const RE_INVOKE_OPEN = new RegExp(`<${P}invoke\\s+name="([^"]+)"\\s*>`, 'y');
+// Also DeepSeek's garbled `parameter name="invoke name="Bash">` and
+// `parameter name="invoke" string="true">Bash</｜DSML｜parameter>`.
+const RE_INVOKE_OPEN = new RegExp(
+  `<${P}(?:parameter\\s+name=")?invoke(?:\\s+name="([^"]+)"|"(?:\\s+string="(?:true|false)")?\\s*>\\s*([^<"\\s]+)\\s*</${P}parameter)\\s*>`, 'y');
 const RE_INVOKE_CLOSE = new RegExp(INVOKE_CLOSE, 'y');
+const RE_CALLS_CLOSE = new RegExp(CALLS_CLOSE, 'y');
 const RE_PARAM_OPEN = new RegExp(`${PARAM_START}([^"<>\\s]+)"(?:\\s+string="(true|false)")?\\s*>`, 'y');
 // A closer ends a value only when DSML structure (or the end) follows, so values may
 // contain closer text themselves, e.g. when the model edits this very file.
@@ -47,8 +52,11 @@ function blockStart(text: string): number {
   return -1;
 }
 
-/** Read the invokes of one block starting at `pos`; stops at the first thing that isn't DSML. */
-function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: boolean } {
+/**
+ * Read the invokes of one block starting at `pos`; stops at the first thing that isn't DSML.
+ * `malformed`: something other than a closer (or the end) followed, so calls may be missing.
+ */
+function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: boolean; malformed: boolean } {
   const calls: ParsedToolCall[] = [];
   const take = (re: RegExp) => {
     while (/\s/.test(text[pos] ?? '')) pos++;
@@ -57,39 +65,51 @@ function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: b
     if (m) pos = re.lastIndex;
     return m;
   };
-  take(RE_CALLS_OPEN);
+  while (take(RE_CALLS_OPEN)); // DeepSeek sometimes repeats the opener
   for (let invoke; (invoke = take(RE_INVOKE_OPEN)); ) {
     const input = new Map<string, unknown>();
     for (let param; (param = take(RE_PARAM_OPEN)); ) {
       RE_VALUE_END.lastIndex = pos;
       const end = RE_VALUE_END.exec(text);
-      if (!end) return { calls, cut: true };
+      if (!end) return { calls, cut: true, malformed: false };
       const value = text.slice(pos, end.index);
       if (!input.has(param[1])) input.set(param[1], param[2] === 'true' ? value : parseJson(value));
       pos = RE_VALUE_END.lastIndex;
     }
-    calls.push({ name: invoke[1], input: Object.fromEntries(input) });
+    calls.push({ name: invoke[1] ?? invoke[2], input: Object.fromEntries(input) });
     if (!take(RE_INVOKE_CLOSE)) break; // missing closer is tolerated, but ends the block
   }
-  return { calls, cut: false };
+  const closed = !!take(RE_CALLS_CLOSE) || pos === text.length;
+  return { calls, cut: false, malformed: !closed };
 }
 
 /**
  * Split a model reply into the prose before its first tool-call block and that block's calls.
  * Text after the block is the model hallucinating results, so it is dropped.
  * `truncated`: the reply stopped inside the block (provider output limit).
+ * `malformed`: the block is garbled beyond the drift tolerated above; ask the model again.
  */
-export function parseToolCalls(text: string): { text: string; calls: ParsedToolCall[]; truncated?: boolean } {
+export function parseToolCalls(text: string): { text: string; calls: ParsedToolCall[]; truncated?: boolean; malformed?: boolean } {
   const start = blockStart(text);
   if (start < 0) return { text, calls: [] };
   const prose = text.slice(0, start).trimEnd();
-  const { calls, cut } = scanBlock(text, start);
+  const { calls, cut, malformed } = scanBlock(text, start);
   if (cut || (calls.length === 0 && !RE_ANY_CLOSE.test(text.slice(start)))) {
     return { text: prose, calls: [], truncated: true };
   }
-  // Malformed block: hand the raw text back rather than silently dropping it.
-  if (calls.length === 0) return { text, calls: [] };
-  return { text: prose, calls };
+  return malformed ? { text: prose, calls, malformed } : { text: prose, calls };
+}
+
+/** A reply's DSML tags with all other text replaced by its length, so logs carry no content. */
+export function dsmlShape(text: string): string {
+  let shape = '';
+  let last = 0;
+  for (const m of text.matchAll(new RegExp(`</?${P}[^<>]{0,80}>`, 'g'))) {
+    if (m.index > last) shape += `«${m.index - last}»`;
+    shape += m[0].replace(/="([^"]*)"/g, (attr, v) => (/^[\w.-]{1,40}$/.test(v) ? attr : '="…"'));
+    last = m.index + m[0].length;
+  }
+  return (last < text.length ? `${shape}«${text.length - last}»` : shape).slice(0, 2000);
 }
 
 export function renderToolCalls(calls: ParsedToolCall[]): string {

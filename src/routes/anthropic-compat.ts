@@ -14,10 +14,14 @@ import {
   streamEventToStopReason,
   type AnthropicContentBlock,
 } from '../core/anthropic-formatter.js';
-import { parseToolCalls, renderToolCalls } from '../core/tool-protocol.js';
+import { dsmlShape, parseToolCalls, renderToolCalls } from '../core/tool-protocol.js';
 import { ProviderQueue } from '../core/queue.js';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import type { Message, ToolDef } from '../core/provider.js';
+
+/** Cooldown when the provider answers "too frequent"; exported for tests. */
+export const rateLimitPacing = { firstWaitMs: 5_000, maxWaitMs: 180_000 };
 
 export function anthropicRoutes(registry: ProviderRegistry): Hono {
   const app = new Hono();
@@ -96,11 +100,23 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
       return { text, thinking, error, code, stopReason };
     }
 
+    const failed = (r: Awaited<ReturnType<typeof attempt>>) => r.error && !r.text && !r.thinking;
+
+    // DeepSeek answers "Messages too frequent" when messages come too close together.
+    // Waiting inside the lane also holds back every queued request (other subagents);
+    // a 429 at once let each agent retry on its own and hit the limit again.
+    async function paced() {
+      for (let wait = rateLimitPacing.firstWaitMs, waited = 0; ; waited += wait, wait *= 2) {
+        const r = await attempt();
+        if (!(failed(r) && r.code === 'upstream_rate_limit') || waited + wait > rateLimitPacing.maxWaitMs) return r;
+        console.warn(`[${provider.info.id}] ${new Date().toISOString()} rate limited, retrying in ${wait / 1000}s`);
+        await sleep(wait);
+      }
+    }
+
     // Web providers drive one shared browser tab, so requests run one at a time;
     // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
-    // Retrying a rate limit at once only extends it; Claude Code backs off on 429.
-    const run = () => queue.enqueue(provider.info.id, attempt);
-    const failed = (r: Awaited<ReturnType<typeof attempt>>) => r.error && !r.text && !r.thinking;
+    const run = () => queue.enqueue(provider.info.id, paced);
     let reply = await run();
     if (failed(reply) && reply.code !== 'upstream_rate_limit') reply = await run();
 
@@ -114,7 +130,16 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
       );
     }
 
-    const parsed = parseToolCalls(reply.text);
+    let parsed = parseToolCalls(reply.text);
+    if (parsed.malformed) {
+      // DeepSeek garbled 4 of 336 tool-call blocks on 2026-10-18; ask once more rather than end the turn.
+      const garbled = (what: string) => console.warn(
+        `[${provider.info.id}] ${new Date().toISOString()} ${what} (${parsed.calls.length} calls): ${dsmlShape(reply.text)}`);
+      garbled('garbled tool-call block, asking again');
+      const again = await run();
+      if (!failed(again)) { reply = again; parsed = parseToolCalls(again.text); }
+      if (parsed.malformed) garbled('still garbled');
+    }
     const prose = reply.thinking + parsed.text + (reply.error ? `\n\nError: ${reply.error}` : '');
     const blocks: AnthropicContentBlock[] = [
       ...(prose ? [{ type: 'text' as const, text: prose }] : []),
@@ -126,7 +151,9 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
       })),
     ];
     if (blocks.length === 0) blocks.push({ type: 'text', text: '' });
-    const stopReason = parsed.truncated ? 'max_tokens' : parsed.calls.length ? 'tool_use' : reply.stopReason;
+    // Cut off or still garbled: max_tokens makes Claude Code ask the model to resume
+    // instead of ending the turn on a call that never ran.
+    const stopReason = parsed.calls.length ? 'tool_use' : parsed.truncated || parsed.malformed ? 'max_tokens' : reply.stopReason;
 
     // chisle: the whole reply is buffered so tool-call blocks can be parsed out
     // before emitting; incremental DSML detection only if streaming latency matters.
