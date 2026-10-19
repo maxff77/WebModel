@@ -43,4 +43,24 @@ describe('DeepSeekProvider.chat SSE handling', () => {
       { type: 'done', reason: 'stop' },
     ]);
   });
+
+  it('streams THINK fragments as thinking and keeps the RESPONSE fragment appended later', async () => {
+    // Shape captured from chat.deepseek.com with thinking_enabled: the snapshot opens a THINK
+    // fragment, its APPENDs follow, then the answer arrives as a new RESPONSE fragment.
+    const sse = 'data: {"v":{"response":{"thinking_enabled":true,"fragments":[{"id":2,"type":"THINK","content":"We","references":[]}]}}}\n\n'
+      + 'data: {"p":"response/fragments/-1/content","o":"APPEND","v":" need"}\n\n'
+      + 'data: {"v":" 391."}\n\n'
+      + 'data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.76}\n\n'
+      + 'data: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"39","references":[],"stage_id":1}]}\n\n'
+      + 'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"1"}\n\n'
+      + 'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n';
+    expect(await events(providerReplying(sse))).toEqual([
+      { type: 'thinking_delta', delta: 'We' },
+      { type: 'thinking_delta', delta: ' need' },
+      { type: 'thinking_delta', delta: ' 391.' },
+      { type: 'text_delta', delta: '39' },
+      { type: 'text_delta', delta: '1' },
+      { type: 'done', reason: 'stop' },
+    ]);
+  });
 });

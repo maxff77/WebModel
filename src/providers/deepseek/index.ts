@@ -221,6 +221,12 @@ export class DeepSeekProvider extends BaseProvider {
       //   {"v":"!"} — short form append (continues previous path)
       //   {"p":"response/status","v":"FINISHED"} — status update
       //   {"p":"response/thinking_content","o":"APPEND","v":"..."} — thinking
+      // Newer replies are a list of fragments: a THINK fragment (reasoning, when thinking is
+      // enabled) then a RESPONSE fragment appended via {"p":"response/fragments","o":"APPEND",
+      // "v":[{type, content}]}. Content patches address a fragment by index, so track their types.
+      const fragmentTypes: string[] = [];
+      const fragmentDelta = (type: string | undefined, delta: string): StreamEvent =>
+        type === 'THINK' ? { type: 'thinking_delta', delta } : { type: 'text_delta', delta };
       const lines = (sseResult.data ?? '').split('\n');
       let lastPath = '';
       let sawSnapshot = false;
@@ -242,9 +248,9 @@ export class DeepSeekProvider extends BaseProvider {
             if (!sawSnapshot) {
               sawSnapshot = true;
               const frags = parsed.v.response.fragments;
-              const last = Array.isArray(frags) ? frags[frags.length - 1] : undefined;
-              if (typeof last?.content === 'string' && last.content.length > 0) {
-                yield { type: 'text_delta', delta: last.content };
+              for (const frag of Array.isArray(frags) ? frags : []) {
+                fragmentTypes.push(frag?.type);
+                if (typeof frag?.content === 'string' && frag.content.length > 0) yield fragmentDelta(frag.type, frag.content);
               }
             }
             continue;
@@ -262,7 +268,15 @@ export class DeepSeekProvider extends BaseProvider {
           if (parsed.p) lastPath = parsed.p;
           const value = parsed.v;
 
-          if (/^response\/(content|fragments\/-?\d+\/content)$/.test(path) && typeof value === 'string' && value.length > 0) {
+          const fragmentContent = /^response\/fragments\/(-?\d+)\/content$/.exec(path);
+          if (path === 'response/fragments' && Array.isArray(value)) {
+            for (const frag of value) {
+              fragmentTypes.push(frag?.type);
+              if (typeof frag?.content === 'string' && frag.content.length > 0) yield fragmentDelta(frag.type, frag.content);
+            }
+          } else if (fragmentContent && typeof value === 'string' && value.length > 0) {
+            yield fragmentDelta(fragmentTypes.at(Number(fragmentContent[1])), value);
+          } else if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'text_delta', delta: value };
           } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'thinking_delta', delta: value };
