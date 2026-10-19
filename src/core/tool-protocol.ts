@@ -20,9 +20,10 @@ const PARAM_START = `<${P}(?:parameter\\s+name=")*`;
 // Sticky patterns, matched by the scanner at its current position.
 const RE_CALLS_OPEN = new RegExp(`<${P}(?:function_)?calls\\s*>`, 'y');
 // Also DeepSeek's garbled `parameter name="invoke name="Bash">` and
-// `parameter name="invoke" string="true">Bash</｜DSML｜parameter>`.
+// `parameter name="invoke" string="true">Bash</｜DSML｜parameter>`. Extra attributes
+// (a `call="n"` copied from the history) are ignored.
 const RE_INVOKE_OPEN = new RegExp(
-  `<${P}(?:parameter\\s+name=")?invoke(?:\\s+name="([^"]+)"|"(?:\\s+string="(?:true|false)")?\\s*>\\s*([^<"\\s]+)\\s*</${P}parameter)\\s*>`, 'y');
+  `<${P}(?:parameter\\s+name=")?invoke(?:\\s+name="([^"]+)"(?:\\s+[\\w-]+="[^"]*")*|"(?:\\s+string="(?:true|false)")?\\s*>\\s*([^<"\\s]+)\\s*</${P}parameter)\\s*>`, 'y');
 const RE_INVOKE_CLOSE = new RegExp(INVOKE_CLOSE, 'y');
 const RE_CALLS_CLOSE = new RegExp(CALLS_CLOSE, 'y');
 const RE_PARAM_OPEN = new RegExp(`${PARAM_START}([^"<>\\s]+)"(?:\\s+string="(true|false)")?\\s*>`, 'y');
@@ -31,7 +32,9 @@ const RE_PARAM_OPEN = new RegExp(`${PARAM_START}([^"<>\\s]+)"(?:\\s+string="(tru
 // chisle: DSML has no escaping; a value holding a closer followed by a parameter opener still splits.
 const RE_VALUE_END = new RegExp(
   `</${P}parameter\\s*>(?=\\s*(?:${PARAM_START}[^"<>\\s]+"|${INVOKE_CLOSE}|${CALLS_CLOSE}|$))`, 'g');
-const RE_BLOCK_START = new RegExp(`<${P}(?:(?:function_)?calls\\s*>|invoke\\s)`, 'g');
+// Any DSML opener outside code starts a block, so unknown garbles (e.g. the opener fused
+// with a parameter, `<｜DSML｜function_calls｜parameter name=`) are flagged, not shown as prose.
+const RE_BLOCK_START = new RegExp(`<${P}\\w`, 'g');
 const RE_ANY_CLOSE = new RegExp(`${INVOKE_CLOSE}|${CALLS_CLOSE}`);
 
 function parseJson(v: string): unknown {
@@ -112,9 +115,10 @@ export function dsmlShape(text: string): string {
   return (last < text.length ? `${shape}«${text.length - last}»` : shape).slice(0, 2000);
 }
 
-export function renderToolCalls(calls: ParsedToolCall[]): string {
-  const invokes = calls.map(({ name, input }) => [
-    `<｜DSML｜invoke name="${name}">`,
+/** `call`: the call's number in the conversation, so the model can tell which result answers it. */
+export function renderToolCalls(calls: (ParsedToolCall & { call?: number })[]): string {
+  const invokes = calls.map(({ name, input, call }) => [
+    `<｜DSML｜invoke name="${name}"${call ? ` call="${call}"` : ''}>`,
     ...Object.entries(input).map(([key, value]) => typeof value === 'string'
       ? `<｜DSML｜parameter name="${key}" string="true">${value}</｜DSML｜parameter>`
       : `<｜DSML｜parameter name="${key}" string="false">${JSON.stringify(value)}</｜DSML｜parameter>`),
@@ -131,6 +135,7 @@ export function renderToolsPrompt(tools: ToolDef[]): string {
     example,
     'Use string="true" for string values (raw, unquoted) and string="false" for any other JSON value. Several invoke blocks may share one function_calls block.',
     'After the block, stop. Results arrive in the next user message as <tool_result> blocks. Never invent tool results.',
+    'Past calls are numbered call="n" in order; a <tool_result call="n"> answers the call with the same number.',
     'Long replies get cut off: keep each tool call small and split large file contents across several calls.',
     '',
     '## Available tools',

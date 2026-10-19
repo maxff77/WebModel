@@ -81,6 +81,11 @@ describe('parseToolCalls', () => {
       .toEqual({ text: 'Ok.', calls: [], truncated: true });
   });
 
+  it('a call number copied from the history is ignored', () => {
+    const reply = block(invoke('Bash" call="4', param('command', 'pwd')));
+    expect(parseToolCalls(reply).calls).toEqual([{ name: 'Bash', input: { command: 'pwd' } }]);
+  });
+
   it('non-string values are JSON', () => {
     expect(parseToolCalls(block(invoke('Read', param('file_path', '/a'), param('limit', '40', false), param('opts', '{"x":[1]}', false)))).calls)
       .toEqual([{ name: 'Read', input: { file_path: '/a', limit: 40, opts: { x: [1] } } }]);
@@ -125,6 +130,12 @@ describe('DeepSeek DSML drift seen in real sessions', () => {
   it('a block with no invoke is flagged malformed, not handed back as prose', () => {
     const text = `Escribo el informe.\n${reply(p('file_path', '/tmp/r.html'), p('content', '<html></html>'), close('invoke'))}`;
     expect(parseToolCalls(text)).toEqual({ text: 'Escribo el informe.', calls: [], malformed: true });
+  });
+
+  it('opener fused with a parameter (invoke and tool name lost) is flagged malformed', () => {
+    // Seen from DeepSeek on 2026-10-18: `<｜DSML｜function_calls｜parameter name="command" ...>`.
+    const text = `Checking the DB.\n\n${open('function_calls｜parameter name="command" string="true"')}pwd${close('parameter')}\n${p('description', 'cwd')}\n${close('invoke')}\n${close('function_calls')}`;
+    expect(parseToolCalls(text)).toEqual({ text: 'Checking the DB.', calls: [], malformed: true });
   });
 
   it('junk after a good invoke keeps the call and flags the block', () => {

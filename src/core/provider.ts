@@ -36,6 +36,8 @@ export interface ChatRequest {
   messages: Message[];
   stream: boolean;
   tools?: ToolDef[];
+  /** Client asked for extended thinking (Anthropic `thinking` enabled/adaptive). */
+  thinking?: boolean;
   signal?: AbortSignal;
 }
 
@@ -48,6 +50,10 @@ export abstract class BaseProvider {
   abstract models(): Promise<ModelInfo[]>;
   abstract chat(req: ChatRequest): AsyncIterable<StreamEvent>;
 }
+
+// ponytail: ~4 chars per token, close enough for English/code; swap in a real tokenizer if Claude Code's context bar must be exact.
+export const estimateTokens = (...texts: string[]): number =>
+  Math.ceil(texts.reduce((n, t) => n + t.length, 0) / 4);
 
 /**
  * Extract plain text from message content, handling both string and
