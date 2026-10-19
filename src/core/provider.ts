@@ -51,9 +51,16 @@ export abstract class BaseProvider {
   abstract chat(req: ChatRequest): AsyncIterable<StreamEvent>;
 }
 
-// ponytail: ~4 chars per token, close enough for English/code; swap in a real tokenizer if Claude Code's context bar must be exact.
+// Script-aware estimate: Latin runs ~0.3 tokens per char (chars/4 is within 20%
+// of a real BPE tokenizer), but CJK is ~0.6 per char, so chars/4 halved every
+// Chinese reply and Claude Code's meter read half the cost.
+// ponytail: heuristic, not a tokenizer; swap in one if the count must be exact.
+const CJK = /[　-鿿豈-﫿＀-￯]/g;
 export const estimateTokens = (...texts: string[]): number =>
-  Math.ceil(texts.reduce((n, t) => n + t.length, 0) / 4);
+  Math.ceil(texts.reduce((n, t) => {
+    const cjk = t.match(CJK)?.length ?? 0;
+    return n + (t.length - cjk) / 4 + cjk * 0.6;
+  }, 0));
 
 /**
  * Extract plain text from message content, handling both string and
