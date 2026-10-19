@@ -69,14 +69,21 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
 
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+    // Claude Code times out or the user cancels; the shared browser tab is the scarce
+    // resource, so abandoned work must stop instead of sending more prompts.
+    const signal = c.req.raw.signal;
+    const disconnected = () =>
+      c.json({ type: 'error', error: { type: 'api_error', message: 'client disconnected' } }, 499 as any);
+
     async function attempt() {
       let text = '';
       let thinking = '';
       let error: string | null = null;
       let code: string | undefined;
       let stopReason = 'end_turn';
+      if (signal.aborted) return { text, thinking, error: 'client disconnected', code: 'aborted', stopReason };
       try {
-        for await (const event of provider.chat({ model, messages, tools, thinking: wantThinking, stream: body.stream === true })) {
+        for await (const event of provider.chat({ model, messages, tools, thinking: wantThinking, stream: body.stream === true, signal })) {
           if (event.type === 'text_delta') text += event.delta;
           else if (event.type === 'thinking_delta') thinking += event.delta;
           else if (event.type === 'error') { error = event.message; code = event.code; }
@@ -96,9 +103,11 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
     async function paced() {
       for (let wait = rateLimitPacing.firstWaitMs, waited = 0; ; waited += wait, wait *= 2) {
         const r = await attempt();
+        if (signal.aborted) return r;
         if (!(failed(r) && r.code === 'upstream_rate_limit') || waited + wait > rateLimitPacing.maxWaitMs) return r;
         console.warn(`[${provider.info.id}] ${new Date().toISOString()} rate limited, retrying in ${wait / 1000}s`);
-        await sleep(wait);
+        // Abort cuts the cooldown so the lane is released to the next request.
+        try { await sleep(wait, undefined, { signal }); } catch { return r; }
       }
     }
 
@@ -106,7 +115,9 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
     // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
     const run = () => queue.enqueue(provider.info.id, paced);
     let reply = await run();
+    if (signal.aborted) return disconnected();
     if (failed(reply) && reply.code !== 'upstream_rate_limit') reply = await run();
+    if (signal.aborted) return disconnected();
 
     // Nothing usable: answer like the real API does, so Claude Code retries
     // instead of treating the error as the assistant's message.
@@ -124,6 +135,7 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
       const garbled = (what: string) => console.warn(
         `[${provider.info.id}] ${new Date().toISOString()} ${what} (${parsed.calls.length} calls): ${dsmlShape(reply.text)}`);
       garbled('garbled tool-call block, asking again');
+      if (signal.aborted) return disconnected();
       const again = await run();
       if (!failed(again)) { reply = again; parsed = parseToolCalls(again.text); }
       if (parsed.malformed) garbled('still garbled');

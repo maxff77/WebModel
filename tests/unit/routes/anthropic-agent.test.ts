@@ -220,6 +220,47 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(calls).toBe(2);
   });
 
+  // The client may give up (Claude Code timeout, user cancel) while its turn waits
+  // in the lane. Abandoned work must not reach the shared browser tab.
+  it('client already gone: the provider is never asked', async () => {
+    const provider = new CapturingProvider('ok');
+    ctx = createTestContext({ providers: [provider as any] });
+    const gone = new AbortController();
+    gone.abort();
+    const res = await ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(false)),
+      signal: gone.signal,
+    });
+    expect(res.status).toBe(499);
+    expect(provider.last).toBeNull();
+  });
+
+  it('client leaves during a rate-limit cooldown: the 5 s wait is cut and no retry is sent', async () => {
+    Object.assign(rateLimitPacing, { firstWaitMs: 5_000, maxWaitMs: 60_000 });
+    let calls = 0;
+    const limited = new CapturingProvider('');
+    limited.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
+    };
+    ctx = createTestContext({ providers: [limited as any] });
+    const gone = new AbortController();
+    const pending = ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(false)),
+      signal: gone.signal,
+    });
+    setTimeout(() => gone.abort(), 20);
+    const started = performance.now();
+    const res = await pending;
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(res.status).toBe(499);
+    expect(calls).toBe(1);
+  });
+
   it('rate limit holds the provider lane and retries after a cooldown, so parallel subagents all succeed', async () => {
     Object.assign(rateLimitPacing, { firstWaitMs: 30, maxWaitMs: 1_000 });
     const starts: number[] = [];
