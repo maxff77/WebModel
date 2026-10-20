@@ -268,6 +268,21 @@ export class DeepSeekProvider extends BaseProvider {
       const fragmentTypes: string[] = [];
       const fragmentDelta = (type: string | undefined, delta: string): StreamEvent =>
         type === 'THINK' ? { type: 'thinking_delta', delta } : { type: 'text_delta', delta };
+      // Content already yielded per fragment: a SET patch replaces the fragment, so emit
+      // only its unseen tail instead of duplicating what streamed before it. A SET that
+      // contradicts what was sent can't be retracted and is dropped.
+      const emitted: string[] = [];
+      const emitFragment = (index: number, type: string | undefined, content: string, op?: string): StreamEvent | null => {
+        const prev = emitted[index] ?? '';
+        if (op === 'SET') {
+          if (!content.startsWith(prev)) return null;
+          emitted[index] = content;
+          const delta = content.slice(prev.length);
+          return delta.length > 0 ? fragmentDelta(type, delta) : null;
+        }
+        emitted[index] = prev + content;
+        return content.length > 0 ? fragmentDelta(type, content) : null;
+      };
       const lines = (sseResult.data ?? '').split('\n');
       let lastPath = '';
       let sawSnapshot = false;
@@ -290,8 +305,10 @@ export class DeepSeekProvider extends BaseProvider {
               sawSnapshot = true;
               const frags = parsed.v.response.fragments;
               for (const frag of Array.isArray(frags) ? frags : []) {
+                const index = fragmentTypes.length;
                 fragmentTypes.push(frag?.type);
-                if (typeof frag?.content === 'string' && frag.content.length > 0) yield fragmentDelta(frag.type, frag.content);
+                const event = typeof frag?.content === 'string' ? emitFragment(index, frag.type, frag.content) : null;
+                if (event) yield event;
               }
             }
             continue;
@@ -308,15 +325,21 @@ export class DeepSeekProvider extends BaseProvider {
           const path = parsed.p ?? lastPath;
           if (parsed.p) lastPath = parsed.p;
           const value = parsed.v;
+          const op = parsed.o as string | undefined;
 
           const fragmentContent = /^response\/fragments\/(-?\d+)\/content$/.exec(path);
           if (path === 'response/fragments' && Array.isArray(value)) {
             for (const frag of value) {
+              const index = fragmentTypes.length;
               fragmentTypes.push(frag?.type);
-              if (typeof frag?.content === 'string' && frag.content.length > 0) yield fragmentDelta(frag.type, frag.content);
+              const event = typeof frag?.content === 'string' ? emitFragment(index, frag.type, frag.content, op) : null;
+              if (event) yield event;
             }
           } else if (fragmentContent && typeof value === 'string' && value.length > 0) {
-            yield fragmentDelta(fragmentTypes.at(Number(fragmentContent[1])), value);
+            const raw = Number(fragmentContent[1]);
+            const index = raw < 0 ? fragmentTypes.length + raw : raw;
+            const event = emitFragment(index, fragmentTypes.at(raw), value, op);
+            if (event) yield event;
           } else if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'text_delta', delta: value };
           } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
