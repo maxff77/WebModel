@@ -36,7 +36,8 @@ const RE_VALUE_END = new RegExp(
 // with a parameter, `<｜DSML｜function_calls｜parameter name=`) are flagged, not shown as prose.
 const RE_BLOCK_START = new RegExp(`<${P}\\w`, 'g');
 const RE_ANY_CLOSE = new RegExp(`${INVOKE_CLOSE}|${CALLS_CLOSE}`);
-const RE_CALL_SHAPED = new RegExp(`<${P}(?:parameter|invoke)`);
+const RE_DSML_OPEN = new RegExp(`<${P}`);
+const RE_REPEATED_CALLS_OPEN = new RegExp(`^\\s*<${P}(?:function_)?calls\\s*>`, 'y');
 
 function parseJson(v: string): unknown {
   try { return JSON.parse(v); } catch { return v; }
@@ -54,6 +55,18 @@ function blockStart(text: string): number {
     if (fences % 2 === 0 && ticks % 2 === 0) return m.index;
   }
   return -1;
+}
+
+/** A DSML opener still pending after any tolerated repeated openers: a call was cut off. */
+function pendingCallPrefix(rest: string): boolean {
+  let tail = rest;
+  RE_REPEATED_CALLS_OPEN.lastIndex = 0;
+  for (;;) {
+    if (!RE_REPEATED_CALLS_OPEN.exec(tail)) break;
+    tail = tail.slice(RE_REPEATED_CALLS_OPEN.lastIndex);
+    RE_REPEATED_CALLS_OPEN.lastIndex = 0;
+  }
+  return RE_DSML_OPEN.test(tail);
 }
 
 /**
@@ -88,7 +101,7 @@ function scanBlock(text: string, pos: number): { calls: ParsedToolCall[]; cut: b
   // Every invoke closed and nothing call-shaped follows: a broken block closer
   // (DeepSeek repeats the opener or drops the DSML prefix) cannot hide a call.
   const closed = !!take(RE_CALLS_CLOSE) || pos === text.length
-    || (invokeClosed && !RE_CALL_SHAPED.test(text.slice(pos)));
+    || (invokeClosed && !pendingCallPrefix(text.slice(pos)));
   return { calls, cut: false, malformed: !closed };
 }
 
