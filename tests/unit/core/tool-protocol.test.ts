@@ -148,6 +148,16 @@ describe('DeepSeek DSML drift seen in real sessions', () => {
     }
   });
 
+  // Cut off mid-second-invoke: the partial tag is call-shaped, so retry instead of
+  // silently dropping the call the model was starting (CodeRabbit, PR #10).
+  it('a truncated invoke prefix after a closed invoke flags the block', () => {
+    for (const tail of ['<｜DSML｜invo', '<｜DSML｜function_calls><｜DSML｜invo']) {
+      expect(parseToolCalls(['<｜DSML｜function_calls>', ...bash('pwd'), tail].join('\n'))).toEqual({
+        text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,
+      });
+    }
+  });
+
   it('junk after a good invoke keeps the call and flags the block', () => {
     expect(parseToolCalls(reply(...bash('pwd'), 'junk', ...bash('ls')))).toEqual({
       text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,
