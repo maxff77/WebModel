@@ -51,6 +51,19 @@ describe('DeepSeekProvider.chat SSE handling', () => {
     ]);
   });
 
+  it('emits only the unseen tail when a fragment content patch is SET', async () => {
+    // CodeRabbit on PR #10: a SET patch replaces the fragment; appending it would duplicate.
+    const sse = 'data: {"v":{"response":{"fragments":[{"type":"RESPONSE","content":"Hola"}]}}}\n\n'
+      + 'data: {"p":"response/fragments/-1/content","o":"SET","v":"Hola mundo"}\n\n'
+      + 'data: {"p":"response/fragments/-1/content","o":"SET","v":"Adiós"}\n\n'
+      + 'data: {"p":"response/status","v":"FINISHED"}\n\n';
+    expect(await events(providerWithSse(sse))).toEqual([
+      { type: 'text_delta', delta: 'Hola' },
+      { type: 'text_delta', delta: ' mundo' },
+      { type: 'done', reason: 'stop' },
+    ]);
+  });
+
   it('streams THINK fragments as thinking and keeps the RESPONSE fragment appended later', async () => {
     // Shape captured from chat.deepseek.com with thinking_enabled: the snapshot opens a THINK
     // fragment, its APPENDs follow, then the answer arrives as a new RESPONSE fragment.
