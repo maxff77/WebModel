@@ -6,6 +6,43 @@ import { DEEPSEEK_WEB_BASE_URL } from './client.js';
 import { AuthStore } from '../../auth/store.js';
 import type { Page } from 'playwright-core';
 
+/** HTTP 200 envelope DeepSeek wraps every reply in. */
+interface SessionCreateEnvelope {
+  code?: number;
+  msg?: string;
+  data?: {
+    biz_code?: number;
+    biz_msg?: string;
+    biz_data?: { chat_session?: { id?: string } };
+  };
+}
+
+interface SessionCreateReply {
+  data?: SessionCreateEnvelope;
+  error?: string;
+}
+
+type SessionCreateResult =
+  | { kind: 'ok'; sessionId: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'malformed' };
+
+/**
+ * DeepSeek answers HTTP 200 even on failure: {code:0, data:{biz_code:0,
+ * biz_data:{chat_session:{id}}}} on success (2026-10-20 shape); {code:40003,
+ * msg:"INVALID_TOKEN", data:null} on auth failure.
+ */
+function sessionCreateResult(reply: SessionCreateReply): SessionCreateResult {
+  if (reply.error) return { kind: 'error', message: reply.error };
+  const envelope = reply.data;
+  const errorCode = envelope?.data?.biz_code ?? envelope?.code;
+  if (errorCode) {
+    return { kind: 'error', message: `${errorCode}: ${envelope?.data?.biz_msg || envelope?.msg || 'unknown error'}` };
+  }
+  const sessionId = envelope?.data?.biz_data?.chat_session?.id;
+  return sessionId ? { kind: 'ok', sessionId } : { kind: 'malformed' };
+}
+
 export class DeepSeekProvider extends BaseProvider {
   readonly info: ProviderInfo = {
     id: 'deepseek-web',
@@ -104,15 +141,19 @@ export class DeepSeekProvider extends BaseProvider {
             const text = await res.text();
             return { error: `HTTP ${res.status}: ${text.substring(0, 200)}` };
           }
-          const data = await res.json();
-          return { sessionId: data?.data?.biz_data?.id || data?.data?.id };
+          return { data: await res.json() };
         } catch (e: any) {
           return { error: e.message };
         }
       }, bearer);
+      const session = sessionCreateResult(sessionResult);
 
-      if (sessionResult.error || !sessionResult.sessionId) {
-        yield { type: 'error', message: `DeepSeek session create failed: ${sessionResult.error || 'no session id'}` };
+      if (session.kind === 'error') {
+        yield { type: 'error', message: `DeepSeek session create failed: ${session.message}` };
+        return;
+      }
+      if (session.kind === 'malformed') {
+        yield { type: 'error', message: 'DeepSeek session create failed: no session id' };
         return;
       }
 
@@ -202,7 +243,7 @@ export class DeepSeekProvider extends BaseProvider {
           return { error: e.message };
         }
       }, {
-        sessionId: sessionResult.sessionId,
+        sessionId: session.sessionId,
         prompt,
         powResponse,
         thinkingEnabled: isThinking,
