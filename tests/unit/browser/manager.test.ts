@@ -199,6 +199,72 @@ describe('BrowserManager profiles', () => {
   });
 });
 
+describe('BrowserManager profile fallback', () => {
+  const work: ActiveProfile = {
+    name: 'work',
+    engine: 'chrome',
+    dir: '/tmp/p/work/data',
+    fallbackProfile: 'personal',
+  };
+  const personal: ActiveProfile = {
+    name: 'personal',
+    engine: 'camoufox',
+    dir: '/tmp/p/personal/data',
+  };
+
+  it('serves the request with the fallback profile when the active one fails to start', async () => {
+    const fallbackContext = fakeContext();
+    const chromeLaunch = vi.fn().mockRejectedValue(new Error('browser failed to start'));
+    const camoufoxLaunch = vi.fn().mockResolvedValue(fallbackContext);
+    const manager = makeManager(
+      { chrome: chromeLaunch, camoufox: camoufoxLaunch },
+      {
+        profile: work,
+        resolveProfile: (name) => (name === 'personal' ? personal : undefined),
+        hasSession: () => true,
+      },
+    );
+
+    await expect(manager.ensureBrowser()).resolves.toBe(fallbackContext);
+
+    expect(manager.getProfile().name).toBe('personal');
+    expect(manager.getEngine()).toBe('camoufox');
+    expect(camoufoxLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({ profileDir: '/tmp/p/personal/data' }),
+    );
+
+    // The failover launched a browser, so it must be owned and closed, not
+    // treated as an attach connection to the user's Chrome.
+    expect(manager.getMode()).toBe('launch');
+    await manager.shutdown();
+    expect(fallbackContext.close).toHaveBeenCalled();
+  });
+
+  it('names the fallback profile and asks for login when it has no session', async () => {
+    const launch = vi.fn().mockRejectedValue(new Error('browser failed to start'));
+    const manager = makeManager(
+      { chrome: launch },
+      { profile: work, resolveProfile: () => personal, hasSession: () => false },
+    );
+
+    await expect(manager.ensureBrowser()).rejects.toThrow(/profile "personal".*login/i);
+    expect(manager.getProfile().name).toBe('work');
+  });
+
+  it('retries the fallback only once', async () => {
+    const launch = vi.fn()
+      .mockRejectedValueOnce(new Error('work failed'))
+      .mockRejectedValueOnce(new Error('personal failed'));
+    const manager = makeManager(
+      { chrome: launch, camoufox: launch },
+      { profile: work, resolveProfile: () => personal, hasSession: () => true },
+    );
+
+    await expect(manager.ensureBrowser()).rejects.toThrow('personal failed');
+    expect(launch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('BrowserManager attach mode', () => {
   function attachManager(overrides: Partial<BrowserManagerOptions> = {}) {
     const userContext = {

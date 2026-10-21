@@ -263,6 +263,7 @@ program
       console.log(chalk.green('  ✓') + ` Browser mode: launch (${active.engine})`);
     }
 
+    let authStore: AuthStore;
     const browserManager = new BrowserManager({
       profile: active,
       startupTimeout: config.browser.startupTimeout,
@@ -270,12 +271,15 @@ program
       loginTimeout: config.browser.loginTimeout,
       cdpUrl,
       mode: browserMode,
+      // A failed launch moves to the profile's declared fallback, if any.
+      resolveProfile: (name) => profiles.resolve(name),
+      hasSession: (name) => authStore.hasSession(name),
     });
 
     // ── Step 4: Register providers ──
     const registry = new ProviderRegistry(config.providers.fallbackModel);
     // Auth state is per profile: providers read the profile the browser is on.
-    const authStore = new AuthStore(stateDir, () => browserManager.getProfile().name);
+    authStore = new AuthStore(stateDir, () => browserManager.getProfile().name);
 
     const browserFetch = (url: string, init: RequestInit) =>
       browserManager.fetchInBrowser(url, init);
@@ -450,6 +454,23 @@ profileCommand
       const profile = await store.create(name, engine);
       console.log(chalk.green('  ✓') + ` Created profile "${profile.name}" (${profile.engine})`);
       console.log(chalk.gray(`    ${store.dataDir(profile.name)}`));
+    } catch (err) {
+      console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+      process.exitCode = 1;
+    }
+  });
+
+profileCommand
+  .command('fallback <name> <fallback>')
+  .description('Serve requests with <fallback> when <name> fails to start')
+  .action(async (name: string, fallback: string) => {
+    const { stateDir, config: configFile } = program.opts();
+    const config = loadConfig({ stateDir, configFile });
+    const store = new ProfileStore(stateDir);
+    await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
+    try {
+      const profile = store.setFallback(name, fallback);
+      console.log(chalk.green('  ✓') + ` "${profile.name}" falls back to "${profile.fallbackProfile}"`);
     } catch (err) {
       console.log(chalk.red(`  ✗ ${(err as Error).message}`));
       process.exitCode = 1;

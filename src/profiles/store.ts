@@ -8,6 +8,8 @@ export interface ProfileManifest {
   name: string;
   engine: BrowserEngine;
   createdAt: string;
+  /** Profile that serves requests when this one fails to start. */
+  fallbackProfile?: string;
 }
 
 export interface ResolvedProfile extends ProfileManifest {
@@ -55,11 +57,12 @@ export class ProfileStore {
   get(name: string): ProfileManifest | undefined {
     try {
       const parsed = JSON.parse(readFileSync(join(this.profileRoot(name), 'manifest.json'), 'utf-8'));
-      const { engine, createdAt } = parsed ?? {};
+      const { engine, createdAt, fallbackProfile } = parsed ?? {};
       if (parsed?.name !== name || (engine !== 'chrome' && engine !== 'camoufox') || typeof createdAt !== 'string') {
         return undefined;
       }
-      return { name, engine, createdAt };
+      if (fallbackProfile !== undefined && typeof fallbackProfile !== 'string') return undefined;
+      return { name, engine, createdAt, ...(fallbackProfile !== undefined ? { fallbackProfile } : {}) };
     } catch {
       return undefined;
     }
@@ -88,7 +91,41 @@ export class ProfileStore {
         'not_found',
       );
     }
+    const fallback = manifest.fallbackProfile;
+    if (fallback === name) {
+      throw new ProfileError(`Profile "${name}" cannot be its own fallback.`, 'invalid');
+    }
+    if (fallback !== undefined && !this.get(fallback)) {
+      throw new ProfileError(
+        `Profile "${name}" declares fallback "${fallback}", which does not exist. ` +
+        `Create it with: web-model-bridge profile create ${fallback} --engine chrome`,
+        'not_found',
+      );
+    }
     return { ...manifest, dir: this.dataDir(name), fingerprint: this.readFingerprint(name) };
+  }
+
+  /** Declare the profile that serves requests when `name` fails to start. */
+  setFallback(name: string, fallback: string): ProfileManifest {
+    const manifest = this.get(name);
+    if (!manifest) {
+      throw new ProfileError(
+        `Unknown profile "${name}". Create it with: web-model-bridge profile create ${name} --engine chrome`,
+        'not_found',
+      );
+    }
+    if (fallback === name) {
+      throw new ProfileError(`Profile "${name}" cannot be its own fallback.`, 'invalid');
+    }
+    if (!this.get(fallback)) {
+      throw new ProfileError(
+        `Unknown profile "${fallback}". Create it with: web-model-bridge profile create ${fallback} --engine chrome`,
+        'not_found',
+      );
+    }
+    const updated: ProfileManifest = { ...manifest, fallbackProfile: fallback };
+    writeFileSync(join(this.profileRoot(name), 'manifest.json'), JSON.stringify(updated, null, 2));
+    return updated;
   }
 
   async create(name: string, engine: BrowserEngine): Promise<ProfileManifest> {

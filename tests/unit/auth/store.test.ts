@@ -112,6 +112,21 @@ describe('AuthStore per profile', () => {
     ]);
   });
 
+  it('reports whether a profile has any active session', () => {
+    let active = 'default';
+    const store = new AuthStore(testDir, () => active);
+
+    store.setStatus('claude-web', 'active');
+    expect(store.hasSession('default')).toBe(true);
+    expect(store.hasSession('work')).toBe(false);
+
+    active = 'work';
+    store.setStatus('deepseek-web', 'expired');
+    expect(store.hasSession('work')).toBe(false);
+    store.setStatus('deepseek-web', 'active');
+    expect(store.hasSession('work')).toBe(true);
+  });
+
   it('records a login against the profile it started on, even after a switch', () => {
     let active = 'default';
     const store = new AuthStore(testDir, () => active);

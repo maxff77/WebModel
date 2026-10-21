@@ -15,6 +15,13 @@ afterEach(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
+/** Edit a manifest by hand, the way a user declares a fallback profile. */
+function setFallback(name: string, fallbackProfile: string): void {
+  const path = join(stateDir, 'profiles', name, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8'));
+  writeFileSync(path, JSON.stringify({ ...manifest, fallbackProfile }, null, 2));
+}
+
 describe('ProfileStore', () => {
   it('creates a profile with its manifest and data directory', async () => {
     const store = new ProfileStore(stateDir);
@@ -68,6 +75,54 @@ describe('ProfileStore', () => {
     const store = new ProfileStore(stateDir);
 
     expect(() => store.resolve('ghost')).toThrow(/profile create ghost/);
+  });
+
+  it('reads the fallback profile declared in the manifest', async () => {
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => ({ ok: true }) });
+    await store.create('work', 'chrome');
+    await store.create('personal', 'camoufox');
+    setFallback('work', 'personal');
+
+    expect(store.resolve('work').fallbackProfile).toBe('personal');
+    expect(store.resolve('personal').fallbackProfile).toBeUndefined();
+  });
+
+  it('writes the fallback into the profile manifest', async () => {
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => ({ ok: true }) });
+    await store.create('work', 'chrome');
+    await store.create('personal', 'camoufox');
+
+    const profile = store.setFallback('work', 'personal');
+
+    expect(profile.fallbackProfile).toBe('personal');
+    expect(store.resolve('work').fallbackProfile).toBe('personal');
+    const manifest = JSON.parse(readFileSync(join(stateDir, 'profiles', 'work', 'manifest.json'), 'utf-8'));
+    expect(manifest).toMatchObject({ name: 'work', engine: 'chrome', fallbackProfile: 'personal' });
+  });
+
+  it('refuses to declare itself or an unknown profile as fallback', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('work', 'chrome');
+
+    expect(() => store.setFallback('work', 'work')).toThrow(/cannot be its own fallback/i);
+    expect(() => store.setFallback('work', 'ghost')).toThrow(/unknown profile "ghost"/i);
+    expect(store.resolve('work').fallbackProfile).toBeUndefined();
+  });
+
+  it('rejects a profile that declares itself as its fallback', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('work', 'chrome');
+    setFallback('work', 'work');
+
+    expect(() => store.resolve('work')).toThrow(/cannot be its own fallback/i);
+  });
+
+  it('rejects a fallback profile that does not exist', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('work', 'chrome');
+    setFallback('work', 'ghost');
+
+    expect(() => store.resolve('work')).toThrow(/fallback "ghost".*does not exist/i);
   });
 
   it('persists a fingerprint only for camoufox profiles', async () => {

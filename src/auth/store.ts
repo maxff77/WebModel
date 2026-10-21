@@ -60,6 +60,11 @@ export class AuthStore {
     return Object.keys(this.data).map(id => this.getStatus(id));
   }
 
+  /** Any provider logged in on `profile`; a fallback profile without one cannot serve. */
+  hasSession(profile: string): boolean {
+    return Object.values(this.load(profile)).some(entry => entry.status === 'active');
+  }
+
   /** `profile` records a login against the profile it started on, not the current one. */
   setStatus(providerId: string, status: AuthStatus, profile = this.activeProfile()): void {
     const entry = { status, lastCheck: new Date().toISOString() };

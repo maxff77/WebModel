@@ -2,6 +2,7 @@ import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { findChromePath } from '../doctor.js';
 import { platform } from 'node:os';
 import { DEFAULT_PROFILE, type ResolvedProfile } from '../profiles/store.js';
+import { BrowserUnavailableError } from '../core/errors.js';
 
 export type BrowserStatus = 'running' | 'idle' | 'stopped';
 export type BrowserMode = 'attach' | 'launch';
@@ -29,8 +30,11 @@ export type CdpConnector = (cdpUrl: string, timeout: number) => Promise<Browser>
 
 export type BrowserEngine = 'chrome' | 'camoufox';
 
-/** The manager only needs the identity, engine, data dir and fingerprint of a profile. */
-export type ActiveProfile = Pick<ResolvedProfile, 'name' | 'engine' | 'dir' | 'fingerprint'>;
+/** The manager only needs the identity, engine, data dir, fingerprint and fallback of a profile. */
+export type ActiveProfile = Pick<
+  ResolvedProfile,
+  'name' | 'engine' | 'dir' | 'fingerprint' | 'fallbackProfile'
+>;
 
 export function isBrowserEngine(value: unknown): value is BrowserEngine {
   return value === 'chrome' || value === 'camoufox';
@@ -65,6 +69,10 @@ export interface BrowserManagerOptions {
   mode?: BrowserMode;     // "attach" (default) | "launch"
   launchers?: Partial<Record<BrowserEngine, BrowserLauncher>>;
   connect?: CdpConnector;
+  /** Load a profile by name; without it, a failed launch cannot fall back. */
+  resolveProfile?: (name: string) => ResolvedProfile | undefined;
+  /** Whether a profile has any session logged in; a fallback without one cannot serve. */
+  hasSession?: (profile: string) => boolean;
 }
 
 const CHROME_ARGS = ['--no-first-run', '--no-default-browser-check'];
@@ -173,11 +181,42 @@ export class BrowserManager {
     }
 
     // Launch mode — start a new browser with persistent profile
-    this.context = await this.launch(true);
+    try {
+      this.context = await this.launch(true);
+    } catch (err) {
+      this.context = await this.launchFallback(err as Error);
+    }
 
     this._status = 'running';
     this.resetIdleTimer();
     return this.context;
+  }
+
+  /**
+   * A launch failure switches to the profile's declared fallback for this and
+   * later requests. A fallback with no session cannot serve: fail clearly.
+   */
+  private async launchFallback(cause: Error): Promise<BrowserContext> {
+    const failed = this._profile;
+    const fallbackName = failed.fallbackProfile;
+    const fallback = fallbackName && fallbackName !== failed.name
+      ? this.opts.resolveProfile?.(fallbackName)
+      : undefined;
+    if (!fallback) throw cause;
+
+    if (this.opts.hasSession && !this.opts.hasSession(fallback.name)) {
+      throw new BrowserUnavailableError(
+        `Profile "${failed.name}" failed to start (${cause.message}). ` +
+        `Fallback profile "${fallback.name}" has no login: open the Dashboard and login as "${fallback.name}".`,
+      );
+    }
+
+    await this.release();
+    this._profile = fallback;
+    // Failover always launches the fallback: it is another identity, never the
+    // user's own Chrome, so attach semantics do not apply.
+    this._mode = 'launch';
+    return this.launch(true);
   }
 
   // Cache: domain → page (avoid re-navigating for same domain)
