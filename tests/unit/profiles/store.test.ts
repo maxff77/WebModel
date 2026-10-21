@@ -125,6 +125,50 @@ describe('ProfileStore', () => {
     expect(() => store.resolve('work')).toThrow(/fallback "ghost".*does not exist/i);
   });
 
+  it('regenerates and persists the fingerprint without touching the profile data', async () => {
+    let fingerprint = { navigator: { userAgent: 'old' } };
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => fingerprint });
+    await store.create('ff', 'camoufox');
+    const dataDir = store.dataDir('ff');
+    writeFileSync(join(dataDir, 'cookies.sqlite'), 'session');
+    fingerprint = { navigator: { userAgent: 'new' } };
+
+    const profile = await store.regenerateFingerprint('ff');
+
+    expect(profile.fingerprint).toEqual({ navigator: { userAgent: 'new' } });
+    expect(JSON.parse(readFileSync(join(stateDir, 'profiles', 'ff', 'fingerprint.json'), 'utf-8'))).toEqual({
+      navigator: { userAgent: 'new' },
+    });
+    expect(store.resolve('ff').fingerprint).toEqual({ navigator: { userAgent: 'new' } });
+    // Cookies and login live in the data dir; regenerating must not touch it.
+    expect(readFileSync(join(dataDir, 'cookies.sqlite'), 'utf-8')).toBe('session');
+  });
+
+  it('refuses to regenerate the fingerprint of a chrome profile', async () => {
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => ({ ok: true }) });
+    await store.create('work', 'chrome');
+
+    await expect(store.regenerateFingerprint('work')).rejects.toMatchObject({ code: 'invalid' });
+    expect(existsSync(join(stateDir, 'profiles', 'work', 'fingerprint.json'))).toBe(false);
+  });
+
+  it('regenerates the fingerprint even when the declared fallback is missing', async () => {
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => ({ ok: true }) });
+    await store.create('ff', 'camoufox');
+    setFallback('ff', 'ghost');
+
+    const profile = await store.regenerateFingerprint('ff');
+
+    expect(profile.fingerprint).toEqual({ ok: true });
+  });
+
+  it('reports a generator that returns nothing instead of crashing', async () => {
+    const store = new ProfileStore(stateDir, { generateFingerprint: () => undefined });
+    await store.create('ff', 'camoufox');
+
+    await expect(store.regenerateFingerprint('ff')).rejects.toThrow(/returned no fingerprint/i);
+  });
+
   it('persists a fingerprint only for camoufox profiles', async () => {
     const store = new ProfileStore(stateDir, { generateFingerprint: () => ({ navigator: { userAgent: 'x' } }) });
 

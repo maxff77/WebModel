@@ -93,6 +93,40 @@ describe('BrowserManager profiles', () => {
     expect(launch).toHaveBeenCalledWith(expect.objectContaining({ fingerprint }));
   });
 
+  it('uses a fingerprint regenerated on disk on the next launch', async () => {
+    const profile = { name: 'ff', engine: 'camoufox' as const, dir: '/tmp/p/ff/data' };
+    let persisted = { ...profile, fingerprint: { seed: 1 } };
+    const launch = vi.fn().mockResolvedValue(fakeContext());
+    const manager = makeManager({ camoufox: launch }, { profile, resolveProfile: () => persisted });
+
+    await manager.ensureBrowser();
+    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ fingerprint: { seed: 1 } }));
+
+    persisted = { ...profile, fingerprint: { seed: 2 } };
+    await manager.shutdown();
+    await manager.ensureBrowser();
+
+    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ fingerprint: { seed: 2 } }));
+  });
+
+  it('keeps the cached profile when it cannot be re-read at launch', async () => {
+    const launch = vi.fn().mockResolvedValue(fakeContext());
+    const manager = makeManager(
+      { camoufox: launch },
+      {
+        profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data', fingerprint: { seed: 1 } },
+        resolveProfile: () => {
+          throw new Error('broken manifest');
+        },
+      },
+    );
+
+    await manager.ensureBrowser();
+
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ fingerprint: { seed: 1 } }));
+    expect(manager.getProfile().name).toBe('ff');
+  });
+
   it('closes the previous context when switching profiles in launch mode', async () => {
     const chromeContext = fakeContext();
     const camoufoxContext = {} as BrowserContext;

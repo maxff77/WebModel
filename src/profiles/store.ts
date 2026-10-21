@@ -4,6 +4,11 @@ import type { BrowserEngine } from '../browser/manager.js';
 
 export const DEFAULT_PROFILE = 'default';
 
+/** Shown whenever a fingerprint changes on a profile that keeps its cookies. */
+export const FINGERPRINT_COOKIE_WARNING =
+  'Keeping the existing cookies with a new fingerprint is more suspicious than a clean profile. ' +
+  'Cookies and login were left untouched; the new fingerprint applies the next time the profile starts.';
+
 export interface ProfileManifest {
   name: string;
   engine: BrowserEngine;
@@ -34,6 +39,13 @@ export interface ProfileStoreOptions {
 }
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+function unknownProfile(name: string): ProfileError {
+  return new ProfileError(
+    `Unknown profile "${name}". Create it with: web-model-bridge profile create ${name} --engine chrome`,
+    'not_found',
+  );
+}
 
 /**
  * Profiles live on disk (`profiles/<name>/manifest.json`); the filesystem is
@@ -85,12 +97,7 @@ export class ProfileStore {
 
   resolve(name: string): ResolvedProfile {
     const manifest = this.get(name);
-    if (!manifest) {
-      throw new ProfileError(
-        `Unknown profile "${name}". Create it with: web-model-bridge profile create ${name} --engine chrome`,
-        'not_found',
-      );
-    }
+    if (!manifest) throw unknownProfile(name);
     const fallback = manifest.fallbackProfile;
     if (fallback === name) {
       throw new ProfileError(`Profile "${name}" cannot be its own fallback.`, 'invalid');
@@ -108,12 +115,7 @@ export class ProfileStore {
   /** Declare the profile that serves requests when `name` fails to start. */
   setFallback(name: string, fallback: string): ProfileManifest {
     const manifest = this.get(name);
-    if (!manifest) {
-      throw new ProfileError(
-        `Unknown profile "${name}". Create it with: web-model-bridge profile create ${name} --engine chrome`,
-        'not_found',
-      );
-    }
+    if (!manifest) throw unknownProfile(name);
     if (fallback === name) {
       throw new ProfileError(`Profile "${name}" cannot be its own fallback.`, 'invalid');
     }
@@ -146,6 +148,24 @@ export class ProfileStore {
     mkdirSync(join(root, 'data'), { recursive: true });
     if (fingerprint !== undefined) this.writeFingerprint(root, fingerprint);
     return this.writeManifest(root, name, engine);
+  }
+
+  /**
+   * Generate and persist a new fingerprint without touching the profile data
+   * (cookies, login). The launcher reads it on the profile's next start.
+   */
+  async regenerateFingerprint(name: string): Promise<ResolvedProfile> {
+    const manifest = this.get(name);
+    if (!manifest) throw unknownProfile(name);
+    if (manifest.engine !== 'camoufox') {
+      throw new ProfileError(`Profile "${name}" uses the chrome engine, which has no fingerprint.`, 'invalid');
+    }
+    const fingerprint = await this.generateFingerprint();
+    if (fingerprint === undefined) {
+      throw new Error('The fingerprint generator returned no fingerprint.');
+    }
+    this.writeFingerprint(this.profileRoot(name), fingerprint);
+    return { ...manifest, dir: this.dataDir(name), fingerprint: this.readFingerprint(name) };
   }
 
   /**

@@ -7,7 +7,7 @@ import { loadConfig, writeActiveProfile } from './config/loader.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
 import { BrowserManager, attachProfileError, effectiveMode, isBrowserEngine } from './browser/manager.js';
-import { ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
+import { FINGERPRINT_COOKIE_WARNING, ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
@@ -339,6 +339,7 @@ program
           writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
           return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
         },
+        regenerateFingerprint: (name) => profiles.regenerateFingerprint(name),
       },
       onLogin: async (providerId: string) => {
         const provider = registry.getProvider(providerId);
@@ -454,6 +455,24 @@ profileCommand
       const profile = await store.create(name, engine);
       console.log(chalk.green('  ✓') + ` Created profile "${profile.name}" (${profile.engine})`);
       console.log(chalk.gray(`    ${store.dataDir(profile.name)}`));
+    } catch (err) {
+      console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+      process.exitCode = 1;
+    }
+  });
+
+profileCommand
+  .command('regenerate <name>')
+  .description('Generate a new fingerprint for a camoufox profile; cookies and login are kept')
+  .action(async (name: string) => {
+    const { stateDir, config: configFile } = program.opts();
+    const config = loadConfig({ stateDir, configFile });
+    const store = new ProfileStore(stateDir);
+    await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
+    try {
+      const profile = await store.regenerateFingerprint(name);
+      console.log(chalk.green('  ✓') + ` New fingerprint saved for "${profile.name}"`);
+      console.log(chalk.yellow('  ⚠') + ` ${FINGERPRINT_COOKIE_WARNING}`);
     } catch (err) {
       console.log(chalk.red(`  ✗ ${(err as Error).message}`));
       process.exitCode = 1;

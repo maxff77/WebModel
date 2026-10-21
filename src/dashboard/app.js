@@ -1,4 +1,7 @@
 var origin = window.location.origin;
+
+// Server-owned copy for the fingerprint warning; refreshed with the profile list.
+var fingerprintWarning = '';
 document.getElementById('openai-url').textContent = origin + '/v1';
 document.getElementById('anthropic-url').textContent = origin;
 
@@ -185,6 +188,7 @@ async function loadProfiles() {
       return;
     }
     var data = await res.json();
+    fingerprintWarning = data.warning || fingerprintWarning;
     countEl.textContent = data.profiles.length + ' profiles · ' + data.active + ' active';
     list.textContent = '';
 
@@ -217,6 +221,15 @@ async function loadProfiles() {
 
       var right = document.createElement('div');
       right.className = 'provider-right';
+      if (p.engine === 'camoufox') {
+        var fpBtn = document.createElement('button');
+        fpBtn.className = 'btn-login';
+        fpBtn.textContent = 'New fingerprint';
+        fpBtn.addEventListener('click', function () {
+          regenerateFingerprint(p.name);
+        });
+        right.appendChild(fpBtn);
+      }
       if (p.name === data.active) {
         var badge = document.createElement('span');
         badge.className = 'badge';
@@ -289,6 +302,27 @@ async function activateProfile(name) {
     loadHealth();
   } catch (err) {
     showToast('Could not switch profiles: ' + err.message);
+  }
+}
+
+async function regenerateFingerprint(name) {
+  var question = 'Regenerate the fingerprint of "' + name + '"?';
+  var ok = confirm(fingerprintWarning ? question + '\n\n' + fingerprintWarning : question);
+  if (!ok) return;
+  try {
+    var res = await fetch('/webmodel/profiles/fingerprint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast(data.message || 'Could not regenerate the fingerprint');
+      return;
+    }
+    showToast('New fingerprint saved for ' + name);
+  } catch (err) {
+    showToast('Could not regenerate the fingerprint: ' + err.message);
   }
 }
 

@@ -600,6 +600,16 @@ export class BrowserManager {
   }
 
   private launch(headless: boolean): Promise<BrowserContext> {
+    // The persisted profile can change between launches (a regenerated
+    // fingerprint); re-read the same profile so the next launch uses it.
+    let persisted: ResolvedProfile | undefined;
+    try {
+      persisted = this.opts.resolveProfile?.(this._profile.name);
+    } catch {
+      // A broken manifest must not turn a launch into a silent account
+      // switch; keep the identity this manager already resolved.
+    }
+    if (persisted?.name === this._profile.name) this._profile = persisted;
     return this.resolveLauncher()({
       profileDir: this._profile.dir,
       headless,
