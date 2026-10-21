@@ -11,7 +11,7 @@ export default defineConfig({
   sourcemap: true,
   dts: false,
   banner: { js: '#!/usr/bin/env node' },
-  external: ['playwright-core'],
+  external: ['playwright-core', 'camoufox-js'],
   onSuccess: async () => {
     const dashDir = join('dist', 'dashboard');
     mkdirSync(dashDir, { recursive: true });

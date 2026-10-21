@@ -15,7 +15,7 @@ let bm: BrowserManager;
 beforeAll(async () => {
   mkdirSync(TMP_DIR, { recursive: true });
   bm = new BrowserManager({
-    profileDir: join(TMP_DIR, 'p'),
+    profile: { name: 'default', engine: 'chrome', dir: join(TMP_DIR, 'p') },
     startupTimeout: 30_000,
     idleShutdown: 0,
     loginTimeout: 300,

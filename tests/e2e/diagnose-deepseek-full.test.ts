@@ -28,7 +28,7 @@ beforeAll(async () => {
   profile = JSON.parse(data.profiles['deepseek-web:default'].token);
 
   bm = new BrowserManager({
-    profileDir: join(TMP_DIR, 'p'),
+    profile: { name: 'default', engine: 'chrome', dir: join(TMP_DIR, 'p') },
     startupTimeout: 30_000, idleShutdown: 0, loginTimeout: 300,
     cdpUrl: 'http://127.0.0.1:9222', mode: 'attach',
   });

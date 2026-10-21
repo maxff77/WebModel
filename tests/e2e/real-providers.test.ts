@@ -88,7 +88,7 @@ beforeAll(async () => {
   profiles = loadAuthProfiles();
 
   browserManager = new BrowserManager({
-    profileDir: join(STATE_DIR, 'profile'),
+    profile: { name: 'default', engine: 'chrome', dir: join(STATE_DIR, 'profile') },
     startupTimeout: 30_000,
     idleShutdown: 0,
     loginTimeout: 300,

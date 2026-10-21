@@ -1,7 +1,7 @@
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { findChromePath } from '../doctor.js';
 import { platform } from 'node:os';
-import { dirname, join } from 'node:path';
+import { DEFAULT_PROFILE, type ResolvedProfile } from '../profiles/store.js';
 
 export type BrowserStatus = 'running' | 'idle' | 'stopped';
 export type BrowserMode = 'attach' | 'launch';
@@ -18,26 +18,53 @@ export interface BrowserLaunchOptions {
   profileDir: string;
   headless: boolean;
   timeout: number;
+  /** Persisted profile fingerprint; Camoufox uses it instead of generating one. */
+  fingerprint?: unknown;
 }
 
 export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<BrowserContext>;
 
+/** Attach-mode seam, injected in tests instead of dialing a real CDP endpoint. */
+export type CdpConnector = (cdpUrl: string, timeout: number) => Promise<Browser>;
+
 export type BrowserEngine = 'chrome' | 'camoufox';
+
+/** The manager only needs the identity, engine, data dir and fingerprint of a profile. */
+export type ActiveProfile = Pick<ResolvedProfile, 'name' | 'engine' | 'dir' | 'fingerprint'>;
+
+export function isBrowserEngine(value: unknown): value is BrowserEngine {
+  return value === 'chrome' || value === 'camoufox';
+}
 
 /** Camoufox is Firefox: there is no CDP to attach to, so it always launches. */
 export function effectiveMode(engine: BrowserEngine, mode: BrowserMode): BrowserMode {
   return engine === 'camoufox' ? 'launch' : mode;
 }
 
+/**
+ * The user's own Chrome belongs to the default profile. Returns the message
+ * to show when a profile would need attach mode but is not the default one.
+ */
+export function attachProfileError(
+  profile: Pick<ResolvedProfile, 'name' | 'engine'>,
+  requestedMode: BrowserMode,
+): string | null {
+  if (effectiveMode(profile.engine, requestedMode) !== 'attach' || profile.name === DEFAULT_PROFILE) {
+    return null;
+  }
+  return `Attach mode uses your own Chrome, which is only available to the "${DEFAULT_PROFILE}" profile. ` +
+    `Start with --browser-mode launch to use the "${profile.name}" profile.`;
+}
+
 export interface BrowserManagerOptions {
-  profileDir: string;
+  profile: ResolvedProfile;
   startupTimeout: number;
   idleShutdown: number;
   loginTimeout: number;
   cdpUrl?: string;        // e.g. "http://127.0.0.1:9222"
   mode?: BrowserMode;     // "attach" (default) | "launch"
-  engine?: BrowserEngine; // "chrome" (default)
   launchers?: Partial<Record<BrowserEngine, BrowserLauncher>>;
+  connect?: CdpConnector;
 }
 
 const CHROME_ARGS = ['--no-first-run', '--no-default-browser-check'];
@@ -75,6 +102,7 @@ async function launchCamoufoxContext(options: BrowserLaunchOptions): Promise<Bro
       user_data_dir: options.profileDir,
       headless: options.headless,
       timeout: options.timeout,
+      fingerprint: options.fingerprint,
     });
   } catch (err) {
     throw new Error(
@@ -89,20 +117,25 @@ const defaultLaunchers: Record<BrowserEngine, BrowserLauncher> = {
   camoufox: launchCamoufoxContext,
 };
 
+async function connectOverCDP(cdpUrl: string, timeout: number): Promise<Browser> {
+  const { chromium } = await import('playwright-core');
+  return chromium.connectOverCDP(cdpUrl, { timeout });
+}
+
 export class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private _status: BrowserStatus = 'stopped';
   private _mode: BrowserMode;
   private _requestedMode: BrowserMode;
-  private _engine: BrowserEngine;
+  private _profile: ResolvedProfile;
   private _loginState: LoginState = { providerId: null, status: 'idle', message: '', startedAt: null };
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private opts: BrowserManagerOptions) {
+    this._profile = opts.profile;
     this._requestedMode = opts.mode ?? 'attach';
-    this._engine = opts.engine ?? 'chrome';
-    this._mode = effectiveMode(this._engine, this._requestedMode);
+    this._mode = effectiveMode(this._profile.engine, this._requestedMode);
   }
 
   /**
@@ -116,12 +149,9 @@ export class BrowserManager {
     }
 
     if (this._mode === 'attach') {
-      const { chromium } = await import('playwright-core');
       const cdpUrl = this.opts.cdpUrl ?? 'http://127.0.0.1:9222';
       try {
-        this.browser = await chromium.connectOverCDP(cdpUrl, {
-          timeout: this.opts.startupTimeout,
-        });
+        this.browser = await (this.opts.connect ?? connectOverCDP)(cdpUrl, this.opts.startupTimeout);
         const contexts = this.browser.contexts();
         this.context = contexts[0] ?? await this.browser.newContext();
         this._status = 'running';
@@ -402,19 +432,27 @@ export class BrowserManager {
   }
 
   getEngine(): BrowserEngine {
-    return this._engine;
+    return this._profile.engine;
+  }
+
+  getProfile(): ResolvedProfile {
+    return { ...this._profile };
   }
 
   /**
-   * Switch the active engine. Releases the current browser so the next
-   * request launches with the new engine. In attach mode this disconnects
-   * from the user's Chrome without closing it.
+   * Switch the active profile. Releases the current browser so the next
+   * request starts the new profile. In attach mode this disconnects from the
+   * user's Chrome without closing it; only the default profile may attach.
    */
-  async activate(engine: BrowserEngine): Promise<void> {
-    if (engine === this._engine) return;
+  async activate(profile: ResolvedProfile): Promise<void> {
+    if (profile.name === this._profile.name) return;
+
+    const attachError = attachProfileError(profile, this._requestedMode);
+    if (attachError) throw new Error(attachError);
+
     await this.release();
-    this._engine = engine;
-    this._mode = effectiveMode(engine, this._requestedMode);
+    this._profile = profile;
+    this._mode = effectiveMode(profile.engine, this._requestedMode);
   }
 
   async shutdown(): Promise<void> {
@@ -481,20 +519,16 @@ export class BrowserManager {
     }
   }
 
-  private profileDirFor(engine: BrowserEngine): string {
-    if (engine === 'chrome') return this.opts.profileDir;
-    return join(dirname(this.opts.profileDir), 'camoufox-profile');
-  }
-
   private launch(headless: boolean): Promise<BrowserContext> {
     return this.resolveLauncher()({
-      profileDir: this.profileDirFor(this._engine),
+      profileDir: this._profile.dir,
       headless,
       timeout: this.opts.startupTimeout,
+      fingerprint: this._profile.fingerprint,
     });
   }
 
-  private resolveLauncher(engine: BrowserEngine = this._engine): BrowserLauncher {
+  private resolveLauncher(engine: BrowserEngine = this._profile.engine): BrowserLauncher {
     return this.opts.launchers?.[engine] ?? defaultLaunchers[engine];
   }
 }

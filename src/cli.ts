@@ -3,10 +3,11 @@ import chalk from 'chalk';
 import open from 'open';
 import { serve } from '@hono/node-server';
 import { createApp } from './server.js';
-import { loadConfig } from './config/loader.js';
+import { loadConfig, writeActiveProfile } from './config/loader.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
-import { BrowserManager, effectiveMode } from './browser/manager.js';
+import { BrowserManager, attachProfileError, effectiveMode, isBrowserEngine } from './browser/manager.js';
+import { ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
@@ -146,9 +147,9 @@ program
   .option('--config <file>', 'config file path')
   .option('-v, --verbose', 'verbose logging')
   .option('--browser-mode <mode>', 'browser mode: attach (default) or launch', 'attach')
-  .option('--engine <engine>', 'browser engine: chrome (default) or camoufox')
+  .option('--engine <engine>', 'engine for a newly created default profile: chrome (default) or camoufox')
+  .option('--profile <name>', 'active browser profile (default: default)')
   .option('--cdp-url <url>', 'Chrome CDP URL for attach mode', 'http://127.0.0.1:9222')
-  .option('--chrome-profile <dir>', 'Chrome user data directory (e.g. ~/.openclaw/browser/openclaw/user-data)')
   .action(async (opts) => {
     console.log('');
 
@@ -162,11 +163,28 @@ program
       host: opts.host,
       authToken: opts.authToken,
       engine: opts.engine,
+      profile: opts.profile,
       verbose: opts.verbose,
     });
 
+    // ── Step 0: Profiles ──
+    // A profile bundles an account identity: immutable engine, own dir, fingerprint.
+    const profiles = new ProfileStore(stateDir);
+    await profiles.migrateLegacy(config.browser.engine, config.browser.profileDir);
+    let active: ResolvedProfile;
+    try {
+      active = profiles.resolve(config.browser.profile);
+    } catch (err) {
+      if (!(err instanceof ProfileError)) throw err;
+      console.log(chalk.red(`  ✗ ${err.message}`));
+      process.exit(1);
+    }
+    if (active.engine !== config.browser.engine) {
+      console.log(chalk.yellow(`  ⚠ browser.engine only applies when a profile is created; "${active.name}" uses ${active.engine}.`));
+    }
+
     // ── Step 1: Environment check ──
-    const doctorResults = await runDoctor({ engine: config.browser.engine });
+    const doctorResults = await runDoctor({ engine: active.engine });
     const hasFatal = doctorResults.some(r => r.status === 'fail');
     if (hasFatal) {
       printDoctorResults(doctorResults);
@@ -187,16 +205,18 @@ program
     }
 
     // ── Step 3: Browser setup ──
-    const engine = config.browser.engine;
     const requestedMode = (opts.browserMode === 'launch' ? 'launch' : 'attach') as 'attach' | 'launch';
-    const browserMode = effectiveMode(engine, requestedMode);
+    const browserMode = effectiveMode(active.engine, requestedMode);
     if (browserMode !== requestedMode) {
       console.log(chalk.yellow('  ⚠ Camoufox does not support attach mode; starting in launch mode.'));
     }
+    const attachError = attachProfileError(active, requestedMode);
+    if (attachError) {
+      console.log(chalk.red(`  ✗ ${attachError}`));
+      process.exit(1);
+    }
     const cdpPort = parseInt(new URL(opts.cdpUrl).port, 10) || 9222;
     const cdpUrl = opts.cdpUrl;
-    // Chrome profile: custom > config > default
-    const chromeProfileDir = opts.chromeProfile ?? config.browser.profileDir ?? join(stateDir, 'chrome-profile');
 
     if (browserMode === 'attach') {
       const cdpAvailable = await checkCDP(cdpUrl);
@@ -212,10 +232,10 @@ program
           // Try launching a SECOND Chrome with independent profile + CDP
           console.log(chalk.gray('  … Chrome running without CDP. Launching a dedicated instance...'));
 
-          const launched = await launchChromeWithCDP(cdpPort, chromeProfileDir);
+          const launched = await launchChromeWithCDP(cdpPort, active.dir);
           if (launched) {
             console.log(chalk.green('  ✓') + ` Dedicated Chrome launched with CDP at port ${cdpPort}`);
-            console.log(chalk.gray(`    Profile: ${chromeProfileDir}`));
+            console.log(chalk.gray(`    Profile: ${active.dir}`));
             console.log(chalk.gray('    First time? Login via Dashboard after server starts.'));
           } else {
             console.log(chalk.yellow('  ⚠ Could not launch dedicated Chrome.'));
@@ -227,10 +247,10 @@ program
           // Chrome not running at all — auto-launch with CDP + dedicated profile
           console.log(chalk.gray('  … Chrome not running, launching with debug port...'));
 
-          const launched = await launchChromeWithCDP(cdpPort, chromeProfileDir);
+          const launched = await launchChromeWithCDP(cdpPort, active.dir);
           if (launched) {
             console.log(chalk.green('  ✓') + ` Chrome launched with CDP at port ${cdpPort}`);
-            console.log(chalk.gray(`    Profile: ${chromeProfileDir}`));
+            console.log(chalk.gray(`    Profile: ${active.dir}`));
           } else {
             console.log(chalk.yellow('  ⚠ Could not auto-launch Chrome with debug port.'));
             console.log(chalk.yellow('    Please start manually:'));
@@ -240,17 +260,16 @@ program
         }
       }
     } else {
-      console.log(chalk.green('  ✓') + ` Browser mode: launch (${engine})`);
+      console.log(chalk.green('  ✓') + ` Browser mode: launch (${active.engine})`);
     }
 
     const browserManager = new BrowserManager({
-      profileDir: config.browser.profileDir,
+      profile: active,
       startupTimeout: config.browser.startupTimeout,
       idleShutdown: config.browser.idleShutdown,
       loginTimeout: config.browser.loginTimeout,
       cdpUrl,
       mode: browserMode,
-      engine,
     });
 
     // ── Step 4: Register providers ──
@@ -305,6 +324,17 @@ program
       authToken: config.server.authToken,
       getBrowserStatus: () => browserManager.getStatus(),
       getBrowserEngine: () => browserManager.getEngine(),
+      profiles: {
+        list: () => profiles.list(),
+        active: () => browserManager.getProfile().name,
+        create: (name, engine) => profiles.create(name, engine),
+        activate: async (name) => {
+          const profile = profiles.resolve(name);
+          await browserManager.activate(profile);
+          writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
+          return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
+        },
+      },
       onLogin: async (providerId: string) => {
         const provider = registry.getProvider(providerId);
         if (!provider) return { status: 'error', message: `Provider "${providerId}" not found.` };
@@ -322,7 +352,7 @@ program
           status: 'login_started',
           message: browserMode === 'attach'
             ? 'A new tab opened in your Chrome. Log in and close the tab when done.'
-            : `A ${engine === 'camoufox' ? 'Camoufox' : 'Chrome'} window opened. Log in and close it when done.`,
+            : `A ${active.engine === 'camoufox' ? 'Camoufox' : 'Chrome'} window opened. Log in and close it when done.`,
         };
       },
       getLoginState: () => browserManager.getLoginState(),
@@ -368,6 +398,60 @@ program
       await browserManager.shutdown();
       process.exit(0);
     });
+  });
+
+const profileCommand = program
+  .command('profile')
+  .description('Manage browser profiles (account identities)');
+
+// State dir, config and engine are global options on the root command.
+profileCommand
+  .command('list')
+  .description('List the profiles on disk')
+  .action(async () => {
+    const { stateDir, config: configFile, profile } = program.opts();
+    const config = loadConfig({ stateDir, configFile, profile });
+    const store = new ProfileStore(stateDir);
+    await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
+
+    const list = store.list();
+    if (list.length === 0) {
+      console.log('  No profiles. Create one with: web-model-bridge profile create <name> --engine chrome');
+      return;
+    }
+    console.log('');
+    for (const profile of list) {
+      const mark = profile.name === config.browser.profile ? '*' : ' ';
+      console.log(`  ${mark} ${profile.name.padEnd(16)} ${profile.engine}`);
+    }
+    console.log('');
+    console.log(chalk.gray(`  state dir: ${stateDir}`));
+    console.log('');
+  });
+
+profileCommand
+  .command('create <name>')
+  .description('Create a profile; its engine cannot be changed later')
+  .action(async (name: string) => {
+    const { stateDir, config: configFile, engine: requestedEngine } = program.opts();
+    const engine = requestedEngine === undefined ? 'chrome' : isBrowserEngine(requestedEngine) ? requestedEngine : null;
+    if (!engine) {
+      console.log(chalk.red(`  ✗ Unknown engine "${requestedEngine}". Use chrome or camoufox.`));
+      process.exitCode = 1;
+      return;
+    }
+
+    const config = loadConfig({ stateDir, configFile });
+    const store = new ProfileStore(stateDir);
+    await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
+    try {
+      const profile = await store.create(name, engine);
+      console.log(chalk.green('  ✓') + ` Created profile "${profile.name}" (${profile.engine})`);
+      console.log(chalk.gray(`    ${store.dataDir(profile.name)}`));
+    } catch (err) {
+      console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+      process.exitCode = 1;
+    }
   });
 
 program

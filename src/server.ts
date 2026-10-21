@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { openaiRoutes } from './routes/openai-compat.js';
 import { anthropicRoutes } from './routes/anthropic-compat.js';
-import { managementRoutes, type ManagementDeps } from './routes/management.js';
+import { managementRoutes, type ManagementDeps, type ProfilesApi } from './routes/management.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
 import type { BrowserEngine, BrowserStatus, LoginState } from './browser/manager.js';
@@ -20,6 +20,7 @@ export interface AppOptions {
   getBrowserStatus?: () => BrowserStatus;
   getBrowserEngine?: () => BrowserEngine;
   getLoginState?: () => LoginState;
+  profiles?: ProfilesApi;
 }
 
 export function createApp(opts: AppOptions): Hono {
@@ -76,6 +77,7 @@ export function createApp(opts: AppOptions): Hono {
     getLoginState: opts.getLoginState,
     getBrowserStatus: opts.getBrowserStatus,
     getBrowserEngine: opts.getBrowserEngine,
+    profiles: opts.profiles,
     startTime: Date.now(),
   };
   app.route('/', managementRoutes(mgmtDeps));

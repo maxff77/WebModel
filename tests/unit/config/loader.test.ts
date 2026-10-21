@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { loadConfig } from '../../../src/config/loader.js';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { loadConfig, writeActiveProfile } from '../../../src/config/loader.js';
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -22,6 +22,7 @@ describe('Config loader', () => {
     expect(config.server.host).toBe('127.0.0.1');
     expect(config.server.authToken).toBeNull();
     expect(config.server.openDashboard).toBe(true);
+    expect(config.browser.profile).toBe('default');
     expect(config.browser.profileDir).toBe(join(testDir, 'chrome-profile'));
     expect(config.browser.startupTimeout).toBe(30000);
     expect(config.browser.idleShutdown).toBe(300);
@@ -66,7 +67,7 @@ server:
     expect(config.server.port).toBe(3456);
   });
 
-  it('resolves profileDir relative to stateDir', () => {
+  it('resolves the legacy profile dir relative to stateDir', () => {
     const config = loadConfig({ stateDir: '/custom/dir' });
     expect(config.browser.profileDir).toBe('/custom/dir/chrome-profile');
   });
@@ -74,6 +75,57 @@ server:
   it('resolves log file relative to stateDir', () => {
     const config = loadConfig({ stateDir: '/custom/dir' });
     expect(config.logging.file).toBe('/custom/dir/logs/bridge.log');
+  });
+
+  it('reads the active profile from YAML', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'browser:\n  profile: work\n');
+    const config = loadConfig({ stateDir: testDir });
+    expect(config.browser.profile).toBe('work');
+  });
+
+  it('--profile overrides the YAML profile', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'browser:\n  profile: work\n');
+    const config = loadConfig({ stateDir: testDir, profile: 'personal' });
+    expect(config.browser.profile).toBe('personal');
+  });
+
+  it('WMB_PROFILE overrides --profile', () => {
+    process.env.WMB_PROFILE = 'env-profile';
+    try {
+      const config = loadConfig({ stateDir: testDir, profile: 'cli-profile' });
+      expect(config.browser.profile).toBe('env-profile');
+    } finally {
+      delete process.env.WMB_PROFILE;
+    }
+  });
+
+  it('persists the active profile without losing other settings', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'server:\n  port: 8080\nbrowser:\n  engine: chrome\n');
+
+    writeActiveProfile({ stateDir: testDir, profile: 'work' });
+
+    const config = loadConfig({ stateDir: testDir });
+    expect(config.browser.profile).toBe('work');
+    expect(config.browser.engine).toBe('chrome');
+    expect(config.server.port).toBe(8080);
+  });
+
+  it('persists the active profile to a custom config file', () => {
+    const configPath = join(testDir, 'custom.yml');
+
+    writeActiveProfile({ stateDir: testDir, configFile: configPath, profile: 'work' });
+
+    const config = loadConfig({ stateDir: testDir, configFile: configPath });
+    expect(config.browser.profile).toBe('work');
+  });
+
+  it('refuses to rewrite a config file it cannot parse', () => {
+    const configPath = join(testDir, 'config.yml');
+    const broken = ': invalid: yaml: [[[';
+    writeFileSync(configPath, broken);
+
+    expect(() => writeActiveProfile({ stateDir: testDir, profile: 'work' })).toThrow(/Refusing to rewrite/);
+    expect(readFileSync(configPath, 'utf-8')).toBe(broken);
   });
 
   it('defaults to the chrome engine', () => {

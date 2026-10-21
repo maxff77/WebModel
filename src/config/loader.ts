@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import yaml from 'js-yaml';
-import type { BrowserEngine } from '../browser/manager.js';
+import { isBrowserEngine, type BrowserEngine } from '../browser/manager.js';
 
 export interface BridgeConfig {
   server: {
@@ -11,8 +11,11 @@ export interface BridgeConfig {
     openDashboard: boolean;
   };
   browser: {
-    /** Browser engine. Default 'chrome'; Camoufox needs its binary (npx camoufox-js fetch). */
+    /** Engine used to create the default profile on first run; the active profile's engine wins. */
     engine: BrowserEngine;
+    /** Name of the active profile under `<stateDir>/profiles/`. */
+    profile: string;
+    /** Legacy Chrome profile dir, moved into profiles/default on first run. */
     profileDir: string;
     startupTimeout: number;
     idleShutdown: number;
@@ -45,6 +48,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
     },
     browser: {
       engine: 'chrome',
+      profile: 'default',
       profileDir: join(stateDir, 'chrome-profile'),
       startupTimeout: 30000,
       idleShutdown: 300,
@@ -78,11 +82,12 @@ interface LoadOptions {
   host?: string;
   authToken?: string;
   engine?: string;
+  profile?: string;
   verbose?: boolean;
 }
 
 function asEngine(value: string | undefined): BrowserEngine | undefined {
-  return value === 'chrome' || value === 'camoufox' ? value : undefined;
+  return isBrowserEngine(value) ? value : undefined;
 }
 
 export function loadConfig(opts: LoadOptions): BridgeConfig {
@@ -116,6 +121,7 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   if (opts.authToken !== undefined) config.server.authToken = opts.authToken;
   const cliEngine = asEngine(opts.engine);
   if (cliEngine) config.browser.engine = cliEngine;
+  if (opts.profile) config.browser.profile = opts.profile;
   if (opts.verbose) config.logging.level = 'debug';
 
   // Environment variable overrides (Docker-friendly)
@@ -126,12 +132,42 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   if (process.env.WMB_FALLBACK_MODEL) config.providers.fallbackModel = process.env.WMB_FALLBACK_MODEL;
   const envEngine = asEngine(process.env.WMB_BROWSER_ENGINE);
   if (envEngine) config.browser.engine = envEngine;
+  if (process.env.WMB_PROFILE) config.browser.profile = process.env.WMB_PROFILE;
   if (process.env.WMB_STATE_DIR) {
     config.browser.profileDir = join(process.env.WMB_STATE_DIR, 'chrome-profile');
     config.logging.file = join(process.env.WMB_STATE_DIR, 'logs', 'bridge.log');
   }
 
   return config;
+}
+
+/** Persist the active profile, keeping every other setting in the YAML file. */
+export function writeActiveProfile(opts: { stateDir: string; configFile?: string; profile: string }): void {
+  const configPath = opts.configFile ?? join(opts.stateDir, 'config.yml');
+  let doc: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    const raw = readFileSync(configPath, 'utf-8');
+    if (raw.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = yaml.load(raw);
+      } catch (err) {
+        throw new Error(`Refusing to rewrite ${configPath}: ${(err as Error).message}`);
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // Never replace a file we could not understand: its settings would be lost.
+        throw new Error(`Refusing to rewrite ${configPath}: it is not a YAML mapping.`);
+      }
+      doc = parsed as Record<string, unknown>;
+    }
+  }
+  const browser = doc.browser && typeof doc.browser === 'object' && !Array.isArray(doc.browser)
+    ? doc.browser as Record<string, unknown>
+    : {};
+  browser.profile = opts.profile;
+  doc.browser = browser;
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, yaml.dump(doc, { lineWidth: 120 }));
 }
 
 function mergeDeep(target: Record<string, unknown>, source: Record<string, unknown>): void {

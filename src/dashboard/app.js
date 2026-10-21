@@ -170,6 +170,128 @@ function pollLoginStatus(providerId) {
   }, 120000);
 }
 
+// Load profiles — names, immutable engine, which one is active
+async function loadProfiles() {
+  var list = document.getElementById('profile-list');
+  var countEl = document.getElementById('profile-count');
+  try {
+    var res = await fetch('/webmodel/profiles');
+    if (!res.ok) {
+      list.textContent = '';
+      var offDiv = document.createElement('div');
+      offDiv.className = 'empty';
+      offDiv.textContent = 'Profiles are not available in this build.';
+      list.appendChild(offDiv);
+      return;
+    }
+    var data = await res.json();
+    countEl.textContent = data.profiles.length + ' profiles · ' + data.active + ' active';
+    list.textContent = '';
+
+    if (data.profiles.length === 0) {
+      var emptyDiv = document.createElement('div');
+      emptyDiv.className = 'empty';
+      emptyDiv.textContent = 'No profiles yet. Create one below.';
+      list.appendChild(emptyDiv);
+      return;
+    }
+
+    data.profiles.forEach(function (p) {
+      var row = document.createElement('div');
+      row.className = 'provider-row';
+
+      var left = document.createElement('div');
+      left.className = 'provider-left';
+
+      var nameEl = document.createElement('span');
+      nameEl.className = 'provider-name';
+      nameEl.textContent = p.name;
+      left.appendChild(nameEl);
+
+      var engineEl = document.createElement('span');
+      engineEl.className = 'model-badge';
+      engineEl.textContent = p.engine;
+      left.appendChild(engineEl);
+
+      row.appendChild(left);
+
+      var right = document.createElement('div');
+      right.className = 'provider-right';
+      if (p.name === data.active) {
+        var badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = 'active';
+        right.appendChild(badge);
+      } else {
+        var btn = document.createElement('button');
+        btn.className = 'btn-login';
+        btn.textContent = 'Use';
+        btn.addEventListener('click', function () {
+          activateProfile(p.name);
+        });
+        right.appendChild(btn);
+      }
+      row.appendChild(right);
+      list.appendChild(row);
+    });
+  } catch (err) {
+    list.textContent = '';
+    var errDiv = document.createElement('div');
+    errDiv.className = 'error';
+    errDiv.textContent = 'Failed to load profiles: ' + err.message;
+    list.appendChild(errDiv);
+  }
+}
+
+async function createProfile() {
+  var input = document.getElementById('profile-name');
+  var name = input.value.trim();
+  var engine = document.getElementById('profile-engine').value;
+  if (!name) {
+    showToast('Profile name is required');
+    return;
+  }
+  try {
+    var res = await fetch('/webmodel/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, engine: engine }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast(data.message || 'Could not create the profile');
+      return;
+    }
+    input.value = '';
+    showToast('Created profile ' + data.profile.name);
+    loadProfiles();
+  } catch (err) {
+    showToast('Could not create the profile: ' + err.message);
+  }
+}
+
+async function activateProfile(name) {
+  try {
+    var res = await fetch('/webmodel/profiles/active', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast(data.message || 'Could not switch profiles');
+      return;
+    }
+    showToast('Active profile: ' + data.active);
+    loadProfiles();
+    loadHealth();
+  } catch (err) {
+    showToast('Could not switch profiles: ' + err.message);
+  }
+}
+
+document.getElementById('profile-create').addEventListener('click', createProfile);
+
 // Load system health stats
 async function loadHealth() {
   try {
@@ -189,6 +311,8 @@ async function loadHealth() {
             'm';
 
     var browserStatus = data.browser ? data.browser.status : 'unknown';
+    var profile = data.browser ? data.browser.profile : 'default';
+    var engine = data.browser ? data.browser.engine : 'chrome';
 
     el.textContent = '';
 
@@ -204,6 +328,7 @@ async function loadHealth() {
         value: browserStatus,
         cls: browserStatus === 'running' ? 'green' : '',
       },
+      { label: 'Profile', value: profile + ' · ' + engine, cls: '' },
     ];
 
     items.forEach(function (item) {
@@ -234,8 +359,10 @@ async function loadHealth() {
 
 // Initial load + auto-refresh every 10s
 loadProviders();
+loadProfiles();
 loadHealth();
 setInterval(function () {
   loadProviders();
+  loadProfiles();
   loadHealth();
 }, 10000);

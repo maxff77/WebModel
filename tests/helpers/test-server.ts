@@ -3,6 +3,7 @@ import { ProviderRegistry } from '../../src/core/registry.js';
 import { AuthStore } from '../../src/auth/store.js';
 import { MockProvider } from './mock-provider.js';
 import type { BrowserEngine } from '../../src/browser/manager.js';
+import type { ProfilesApi } from '../../src/routes/management.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,8 @@ export function createTestContext(opts?: {
   providers?: MockProvider[];
   fallbackModel?: string;
   browserEngine?: BrowserEngine;
+  /** Built from the context's temp stateDir, so tests can use a real ProfileStore. */
+  profiles?: (stateDir: string) => ProfilesApi;
 }): TestContext {
   const stateDir = join(tmpdir(), `wmb-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(stateDir, { recursive: true });
@@ -43,6 +46,7 @@ export function createTestContext(opts?: {
     authStore,
     authToken: opts?.authToken ?? null,
     getBrowserEngine: opts?.browserEngine ? () => opts.browserEngine! : undefined,
+    profiles: opts?.profiles?.(stateDir),
   });
 
   return {

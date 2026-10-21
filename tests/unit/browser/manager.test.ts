@@ -1,13 +1,23 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { BrowserContext } from 'playwright-core';
-import { BrowserManager, type BrowserManagerOptions } from '../../../src/browser/manager.js';
+import type { Browser, BrowserContext } from 'playwright-core';
+import {
+  BrowserManager,
+  type ActiveProfile,
+  type BrowserManagerOptions,
+} from '../../../src/browser/manager.js';
+
+const defaultProfile: ActiveProfile = {
+  name: 'default',
+  engine: 'chrome',
+  dir: '/tmp/webmodel-profile/data',
+};
 
 function makeManager(
   launchers: BrowserManagerOptions['launchers'],
   overrides: Partial<BrowserManagerOptions> = {},
 ) {
   return new BrowserManager({
-    profileDir: '/tmp/webmodel-profile',
+    profile: defaultProfile,
     startupTimeout: 5000,
     idleShutdown: 0,
     loginTimeout: 5,
@@ -17,57 +27,59 @@ function makeManager(
   });
 }
 
-describe('BrowserManager launchers', () => {
-  it('launches the chrome engine with the injected launcher and its profile dir', async () => {
+function fakeContext() {
+  return {
+    close: vi.fn().mockResolvedValue(undefined),
+    newPage: vi.fn(),
+  } as unknown as BrowserContext & { close: ReturnType<typeof vi.fn> };
+}
+
+describe('BrowserManager profiles', () => {
+  it('launches the active profile with its engine, launcher and data directory', async () => {
     const context = {} as BrowserContext;
     const launch = vi.fn().mockResolvedValue(context);
 
     const manager = makeManager({ chrome: launch });
 
     await expect(manager.ensureBrowser()).resolves.toBe(context);
-    expect(launch).toHaveBeenCalledOnce();
     expect(launch).toHaveBeenCalledWith(
-      expect.objectContaining({ profileDir: '/tmp/webmodel-profile', headless: true }),
+      expect.objectContaining({ profileDir: '/tmp/webmodel-profile/data', headless: true }),
     );
+    expect(manager.getProfile().name).toBe('default');
+    expect(manager.getEngine()).toBe('chrome');
   });
 
-  it('uses the launcher of the active engine', async () => {
+  it('uses the launcher of the profile engine', async () => {
     const chromeLaunch = vi.fn();
-    const camoufoxContext = {} as BrowserContext;
-    const camoufoxLaunch = vi.fn().mockResolvedValue(camoufoxContext);
+    const camoufoxLaunch = vi.fn().mockResolvedValue({} as BrowserContext);
 
     const manager = makeManager(
       { chrome: chromeLaunch, camoufox: camoufoxLaunch },
-      { engine: 'camoufox' },
+      { profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' } },
     );
 
-    await expect(manager.ensureBrowser()).resolves.toBe(camoufoxContext);
-    expect(camoufoxLaunch).toHaveBeenCalledOnce();
+    await manager.ensureBrowser();
+    expect(camoufoxLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({ profileDir: '/tmp/p/ff/data' }),
+    );
     expect(chromeLaunch).not.toHaveBeenCalled();
   });
 
-  it('launches each engine with its own profile dir', async () => {
-    const chromeLaunch = vi.fn().mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext);
-    const camoufoxLaunch = vi.fn().mockResolvedValue({} as BrowserContext);
+  it('passes the persisted fingerprint to the camoufox launcher', async () => {
+    const launch = vi.fn().mockResolvedValue({} as BrowserContext);
+    const fingerprint = { navigator: { userAgent: 'firefox' } };
     const manager = makeManager(
-      { chrome: chromeLaunch, camoufox: camoufoxLaunch },
-      { profileDir: '/tmp/wmb/chrome-profile' },
+      { camoufox: launch },
+      { profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data', fingerprint } },
     );
 
     await manager.ensureBrowser();
-    expect(chromeLaunch).toHaveBeenCalledWith(
-      expect.objectContaining({ profileDir: '/tmp/wmb/chrome-profile' }),
-    );
 
-    await manager.activate('camoufox');
-    await manager.ensureBrowser();
-    expect(camoufoxLaunch).toHaveBeenCalledWith(
-      expect.objectContaining({ profileDir: '/tmp/wmb/camoufox-profile' }),
-    );
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ fingerprint }));
   });
 
-  it('activates another engine and releases the previous context', async () => {
-    const chromeContext = { close: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
+  it('closes the previous context when switching profiles in launch mode', async () => {
+    const chromeContext = fakeContext();
     const camoufoxContext = {} as BrowserContext;
     const camoufoxLaunch = vi.fn().mockResolvedValue(camoufoxContext);
     const manager = makeManager({
@@ -75,13 +87,12 @@ describe('BrowserManager launchers', () => {
       camoufox: camoufoxLaunch,
     });
 
-    expect(manager.getEngine()).toBe('chrome');
     await manager.ensureBrowser();
+    await manager.activate({ name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' });
 
-    await manager.activate('camoufox');
-
-    expect(manager.getEngine()).toBe('camoufox');
     expect(chromeContext.close).toHaveBeenCalled();
+    expect(manager.getProfile().name).toBe('ff');
+    expect(manager.getEngine()).toBe('camoufox');
     await expect(manager.ensureBrowser()).resolves.toBe(camoufoxContext);
   });
 
@@ -96,26 +107,35 @@ describe('BrowserManager launchers', () => {
   it('launches camoufox when attach mode is requested', async () => {
     const context = {} as BrowserContext;
     const launch = vi.fn().mockResolvedValue(context);
-    const manager = makeManager({ camoufox: launch }, { engine: 'camoufox', mode: 'attach' });
+    const manager = makeManager(
+      { camoufox: launch },
+      { profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' }, mode: 'attach' },
+    );
 
     expect(manager.getMode()).toBe('launch');
     await expect(manager.ensureBrowser()).resolves.toBe(context);
     expect(launch).toHaveBeenCalledOnce();
   });
 
-  it('recomputes the mode when the engine is activated', async () => {
-    const context = { close: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
-    const manager = makeManager({ chrome: vi.fn().mockResolvedValue(context) }, { mode: 'attach' });
+  it('recomputes the mode when a profile is activated', async () => {
+    const userContext = fakeContext();
+    const browser = {
+      contexts: () => [userContext],
+      newContext: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const connect = vi.fn().mockResolvedValue(browser as unknown as Browser);
+    const manager = makeManager({}, { mode: 'attach', connect });
 
     await manager.ensureBrowser();
-    await manager.activate('camoufox');
+    await manager.activate({ name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' });
     expect(manager.getMode()).toBe('launch');
 
-    await manager.activate('chrome');
+    await manager.activate(defaultProfile);
     expect(manager.getMode()).toBe('attach');
   });
 
-  it('opens the login window through the injected launcher, headed', async () => {
+  it('opens the login window with the active profile', async () => {
     let onPageClose: (() => void) | undefined;
     const page = {
       goto: vi.fn().mockResolvedValue(undefined),
@@ -137,7 +157,7 @@ describe('BrowserManager launchers', () => {
     await manager.startLogin('deepseek-web', 'https://chat.deepseek.com', onComplete);
 
     expect(launch).toHaveBeenCalledWith(
-      expect.objectContaining({ profileDir: '/tmp/webmodel-profile', headless: false }),
+      expect.objectContaining({ profileDir: '/tmp/webmodel-profile/data', headless: false }),
     );
     expect(page.goto).toHaveBeenCalledWith('https://chat.deepseek.com', expect.anything());
 
@@ -164,20 +184,75 @@ describe('BrowserManager launchers', () => {
 
     const manager = makeManager(
       { camoufox: launch },
-      {
-        engine: 'camoufox',
-        profileDir: '/tmp/wmb/chrome-profile',
-      },
+      { profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' } },
     );
     const onComplete = vi.fn();
 
     await manager.startLogin('deepseek-web', 'https://chat.deepseek.com', onComplete);
 
     expect(launch).toHaveBeenCalledWith(
-      expect.objectContaining({ profileDir: '/tmp/wmb/camoufox-profile', headless: false }),
+      expect.objectContaining({ profileDir: '/tmp/p/ff/data', headless: false }),
     );
 
     onPageClose?.();
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true));
+  });
+});
+
+describe('BrowserManager attach mode', () => {
+  function attachManager(overrides: Partial<BrowserManagerOptions> = {}) {
+    const userContext = {
+      close: vi.fn().mockResolvedValue(undefined),
+      newPage: vi.fn(),
+    };
+    const browser = {
+      contexts: vi.fn().mockReturnValue([userContext]),
+      newContext: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const connect = vi.fn().mockResolvedValue(browser as unknown as Browser);
+    const manager = makeManager({}, { mode: 'attach', connect, ...overrides });
+    return { manager, browser, userContext, connect };
+  }
+
+  it('rejects a non-default chrome profile in attach mode', async () => {
+    const { manager, browser, userContext, connect } = attachManager();
+    await manager.ensureBrowser();
+
+    await expect(
+      manager.activate({ name: 'work', engine: 'chrome', dir: '/tmp/p/work/data' }),
+    ).rejects.toThrow(/only.*"default" profile/i);
+
+    expect(manager.getProfile().name).toBe('default');
+    expect(connect).toHaveBeenCalledOnce();
+    expect(browser.close).not.toHaveBeenCalled();
+    expect(userContext.close).not.toHaveBeenCalled();
+  });
+
+  it('switching to a launch profile disconnects without closing the user Chrome', async () => {
+    const camoufoxContext = {} as BrowserContext;
+    const camoufoxLaunch = vi.fn().mockResolvedValue(camoufoxContext);
+    const { manager, browser, userContext } = attachManager({
+      launchers: { camoufox: camoufoxLaunch },
+    });
+    await manager.ensureBrowser();
+
+    await manager.activate({ name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' });
+
+    // Playwright's CDP Browser.close() closes the socket, not the browser.
+    expect(browser.close).toHaveBeenCalledOnce();
+    expect(userContext.close).not.toHaveBeenCalled();
+    expect(manager.getMode()).toBe('launch');
+    await expect(manager.ensureBrowser()).resolves.toBe(camoufoxContext);
+  });
+
+  it('shutdown disconnects from the user Chrome without closing it', async () => {
+    const { manager, browser, userContext } = attachManager();
+    await manager.ensureBrowser();
+
+    await manager.shutdown();
+
+    expect(browser.close).toHaveBeenCalledOnce();
+    expect(userContext.close).not.toHaveBeenCalled();
   });
 });
