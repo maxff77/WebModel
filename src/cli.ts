@@ -155,18 +155,6 @@ program
     const stateDir = opts.stateDir;
     mkdirSync(stateDir, { recursive: true });
 
-    // ── Step 1: Environment check ──
-    const doctorResults = await runDoctor();
-    const hasFatal = doctorResults.some(r => r.status === 'fail');
-    if (hasFatal) {
-      printDoctorResults(doctorResults);
-      console.log(chalk.red('  Cannot start. Please fix the issues above.'));
-      process.exit(1);
-    }
-    if (opts.verbose) {
-      printDoctorResults(doctorResults);
-    }
-
     const config = loadConfig({
       stateDir,
       configFile: opts.config,
@@ -176,6 +164,18 @@ program
       engine: opts.engine,
       verbose: opts.verbose,
     });
+
+    // ── Step 1: Environment check ──
+    const doctorResults = await runDoctor({ engine: config.browser.engine });
+    const hasFatal = doctorResults.some(r => r.status === 'fail');
+    if (hasFatal) {
+      printDoctorResults(doctorResults);
+      console.log(chalk.red('  Cannot start. Please fix the issues above.'));
+      process.exit(1);
+    }
+    if (opts.verbose || doctorResults.some(r => r.status === 'warn')) {
+      printDoctorResults(doctorResults);
+    }
 
     // ── Step 2: Find available port ──
     let serverPort = config.server.port;
