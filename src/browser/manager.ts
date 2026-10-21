@@ -259,7 +259,10 @@ export class BrowserManager {
    * In attach mode: login is not needed — user already logged in.
    * In launch mode: open headed Chrome for login.
    */
-  async startLogin(providerId: string, loginUrl: string, onComplete: (success: boolean) => void): Promise<void> {
+  async startLogin(providerId: string, loginUrl: string, onComplete: (success: boolean, profile: string) => void): Promise<void> {
+    // The profile the window actually opens on: it can change while a switch
+    // releases the current browser, so report it to the caller.
+    let loginProfile = this._profile.name;
     if (this._mode === 'attach') {
       // In attach mode, just open a new tab in the user's existing Chrome
       try {
@@ -295,7 +298,7 @@ export class BrowserManager {
             message: `Login completed for ${providerId}.`,
             startedAt: null,
           };
-          onComplete(true);
+          onComplete(true, loginProfile);
 
           setTimeout(() => {
             if (this._loginState.status === 'success') {
@@ -306,7 +309,7 @@ export class BrowserManager {
 
         waitDone().catch(() => {
           this._loginState = { providerId, status: 'failed', message: 'Login tab closed unexpectedly.', startedAt: null };
-          onComplete(false);
+          onComplete(false, loginProfile);
         });
 
       } catch (err) {
@@ -316,7 +319,7 @@ export class BrowserManager {
           message: `Failed: ${(err as Error).message}`,
           startedAt: null,
         };
-        onComplete(false);
+        onComplete(false, loginProfile);
       }
       return;
     }
@@ -334,6 +337,7 @@ export class BrowserManager {
         this.context = null;
       }
 
+      loginProfile = this._profile.name;
       const headedContext = await this.launch(false);
 
       const page: Page = await headedContext.newPage();
@@ -362,7 +366,7 @@ export class BrowserManager {
         this.context = null;
 
         this._loginState = { providerId, status: 'success', message: `Login completed for ${providerId}.`, startedAt: null };
-        onComplete(true);
+        onComplete(true, loginProfile);
 
         setTimeout(() => {
           if (this._loginState.status === 'success') {
@@ -373,12 +377,12 @@ export class BrowserManager {
 
       waitForCompletion().catch((err) => {
         this._loginState = { providerId, status: 'failed', message: `Login failed: ${(err as Error).message}`, startedAt: null };
-        onComplete(false);
+        onComplete(false, loginProfile);
       });
 
     } catch (err) {
       this._loginState = { providerId, status: 'failed', message: `Failed: ${(err as Error).message}`, startedAt: null };
-      onComplete(false);
+      onComplete(false, loginProfile);
     }
   }
 

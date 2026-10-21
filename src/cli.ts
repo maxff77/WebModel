@@ -274,7 +274,8 @@ program
 
     // ── Step 4: Register providers ──
     const registry = new ProviderRegistry(config.providers.fallbackModel);
-    const authStore = new AuthStore(stateDir);
+    // Auth state is per profile: providers read the profile the browser is on.
+    const authStore = new AuthStore(stateDir, () => browserManager.getProfile().name);
 
     const browserFetch = (url: string, init: RequestInit) =>
       browserManager.fetchInBrowser(url, init);
@@ -339,9 +340,10 @@ program
         const provider = registry.getProvider(providerId);
         if (!provider) return { status: 'error', message: `Provider "${providerId}" not found.` };
 
-        await browserManager.startLogin(providerId, provider.info.loginUrl, (success) => {
+        // The manager reports the profile the login window actually opened on.
+        await browserManager.startLogin(providerId, provider.info.loginUrl, (success, profile) => {
           if (success) {
-            authStore.setStatus(providerId, 'active');
+            authStore.setStatus(providerId, 'active', profile);
             console.log(chalk.green(`  ✓ ${providerId} login completed. Cookies saved.`));
           } else {
             console.log(chalk.yellow(`  ⚠ ${providerId} login did not complete.`));

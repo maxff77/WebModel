@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { AuthStore } from '../../../src/auth/store.js';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -61,5 +61,87 @@ describe('AuthStore', () => {
     store.setStatus('claude-web', 'active');
     store.setStatus('claude-web', 'expired');
     expect(store.getStatus('claude-web').status).toBe('expired');
+  });
+});
+
+describe('AuthStore per profile', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `wmb-auth-profile-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('keeps each profile\'s status separate and follows the active profile', () => {
+    let active = 'default';
+    const store = new AuthStore(testDir, () => active);
+
+    store.setStatus('claude-web', 'active');
+    active = 'work';
+    expect(store.getStatus('claude-web').status).toBe('none');
+
+    store.setStatus('claude-web', 'expired');
+    active = 'default';
+    expect(store.getStatus('claude-web').status).toBe('active');
+
+    active = 'work';
+    expect(store.getStatus('claude-web').status).toBe('expired');
+  });
+
+  it('clears and lists statuses for the active profile only', () => {
+    let active = 'default';
+    const store = new AuthStore(testDir, () => active);
+
+    store.setStatus('claude-web', 'active');
+    store.setStatus('deepseek-web', 'expired');
+    active = 'work';
+    store.setStatus('claude-web', 'active');
+
+    expect(store.getAllStatuses().map(s => s.providerId)).toEqual(['claude-web']);
+    store.clearStatus('claude-web');
+    expect(store.getStatus('claude-web').status).toBe('none');
+
+    active = 'default';
+    expect(store.getAllStatuses().map(s => [s.providerId, s.status])).toEqual([
+      ['claude-web', 'active'],
+      ['deepseek-web', 'expired'],
+    ]);
+  });
+
+  it('records a login against the profile it started on, even after a switch', () => {
+    let active = 'default';
+    const store = new AuthStore(testDir, () => active);
+
+    active = 'work';
+    store.setStatus('deepseek-web', 'active', 'default');
+
+    expect(store.getStatus('deepseek-web').status).toBe('none');
+    expect(new AuthStore(testDir, () => 'default').getStatus('deepseek-web').status).toBe('active');
+  });
+
+  it('migrates the legacy global auth.json into the default profile', () => {
+    const lastCheck = '2026-10-01T00:00:00.000Z';
+    writeFileSync(
+      join(testDir, 'auth.json'),
+      JSON.stringify({ 'claude-web': { status: 'active', lastCheck } }),
+    );
+
+    const store = new AuthStore(testDir);
+    expect(store.getStatus('claude-web')).toEqual({ providerId: 'claude-web', status: 'active', lastCheck });
+    expect(existsSync(join(testDir, 'auth.json'))).toBe(false);
+  });
+
+  it('does not leak the legacy global auth.json into another profile', () => {
+    writeFileSync(
+      join(testDir, 'auth.json'),
+      JSON.stringify({ 'claude-web': { status: 'active', lastCheck: '2026-10-01T00:00:00.000Z' } }),
+    );
+
+    const store = new AuthStore(testDir, () => 'work');
+    expect(store.getStatus('claude-web').status).toBe('none');
   });
 });

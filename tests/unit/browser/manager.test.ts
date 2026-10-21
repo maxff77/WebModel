@@ -162,7 +162,7 @@ describe('BrowserManager profiles', () => {
     expect(page.goto).toHaveBeenCalledWith('https://chat.deepseek.com', expect.anything());
 
     onPageClose?.();
-    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true, 'default'));
     expect(context.close).toHaveBeenCalled();
   });
 
@@ -195,7 +195,7 @@ describe('BrowserManager profiles', () => {
     );
 
     onPageClose?.();
-    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith(true, 'ff'));
   });
 });
 

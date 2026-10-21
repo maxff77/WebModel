@@ -283,6 +283,8 @@ async function activateProfile(name) {
       return;
     }
     showToast('Active profile: ' + data.active);
+    // Auth status is per profile, so refresh the provider rows for the new one.
+    loadProviders();
     loadProfiles();
     loadHealth();
   } catch (err) {
