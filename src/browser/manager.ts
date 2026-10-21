@@ -13,6 +13,16 @@ export interface LoginState {
   startedAt: number | null;
 }
 
+export interface BrowserLaunchOptions {
+  profileDir: string;
+  headless: boolean;
+  timeout: number;
+}
+
+export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<BrowserContext>;
+
+export type BrowserEngine = 'chrome' | 'camoufox';
+
 export interface BrowserManagerOptions {
   profileDir: string;
   startupTimeout: number;
@@ -20,6 +30,24 @@ export interface BrowserManagerOptions {
   loginTimeout: number;
   cdpUrl?: string;        // e.g. "http://127.0.0.1:9222"
   mode?: BrowserMode;     // "attach" (default) | "launch"
+  engine?: BrowserEngine; // "chrome" (default)
+  launchers?: Partial<Record<BrowserEngine, BrowserLauncher>>;
+}
+
+async function launchChromeContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
+  const executablePath = findChromePath();
+  if (!executablePath) {
+    throw new Error('Chrome not found. Install Google Chrome first.');
+  }
+  const { chromium } = await import('playwright-core');
+  return chromium.launchPersistentContext(options.profileDir, {
+    headless: options.headless,
+    executablePath,
+    args: options.headless
+      ? ['--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling']
+      : ['--no-first-run', '--no-default-browser-check'],
+    timeout: options.timeout,
+  });
 }
 
 export class BrowserManager {
@@ -27,11 +55,13 @@ export class BrowserManager {
   private context: BrowserContext | null = null;
   private _status: BrowserStatus = 'stopped';
   private _mode: BrowserMode;
+  private _engine: BrowserEngine;
   private _loginState: LoginState = { providerId: null, status: 'idle', message: '', startedAt: null };
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private opts: BrowserManagerOptions) {
     this._mode = opts.mode ?? 'attach';
+    this._engine = opts.engine ?? 'chrome';
   }
 
   /**
@@ -44,9 +74,8 @@ export class BrowserManager {
       return this.context;
     }
 
-    const { chromium } = await import('playwright-core');
-
     if (this._mode === 'attach') {
+      const { chromium } = await import('playwright-core');
       const cdpUrl = this.opts.cdpUrl ?? 'http://127.0.0.1:9222';
       try {
         this.browser = await chromium.connectOverCDP(cdpUrl, {
@@ -72,20 +101,10 @@ export class BrowserManager {
       }
     }
 
-    // Launch mode — start new Chrome with persistent profile
-    const executablePath = this.findChrome();
-    if (!executablePath) {
-      throw new Error('Chrome not found. Install Google Chrome first.');
-    }
-
-    this.context = await chromium.launchPersistentContext(this.opts.profileDir, {
+    // Launch mode — start a new browser with persistent profile
+    this.context = await this.launcher()({
+      profileDir: this.opts.profileDir,
       headless: true,
-      executablePath,
-      args: [
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-background-timer-throttling',
-      ],
       timeout: this.opts.startupTimeout,
     });
 
@@ -248,18 +267,9 @@ export class BrowserManager {
         this.context = null;
       }
 
-      const { chromium } = await import('playwright-core');
-      const executablePath = this.findChrome();
-      if (!executablePath) {
-        this._loginState = { providerId, status: 'failed', message: 'Chrome not found.', startedAt: null };
-        onComplete(false);
-        return;
-      }
-
-      const headedContext = await chromium.launchPersistentContext(this.opts.profileDir, {
+      const headedContext = await this.launcher()({
+        profileDir: this.opts.profileDir,
         headless: false,
-        executablePath,
-        args: ['--no-first-run', '--no-default-browser-check'],
         timeout: this.opts.startupTimeout,
       });
 
@@ -415,6 +425,13 @@ export class BrowserManager {
         this.shutdown();
       }, this.opts.idleShutdown * 1000);
     }
+  }
+
+  private launcher(): BrowserLauncher {
+    const launcher = this.opts.launchers?.[this._engine];
+    if (launcher) return launcher;
+    if (this._engine === 'chrome') return launchChromeContext;
+    throw new Error(`No launcher configured for browser engine "${this._engine}".`);
   }
 
   private findChrome(): string | undefined {
