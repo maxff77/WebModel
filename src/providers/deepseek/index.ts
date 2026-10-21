@@ -371,7 +371,7 @@ export class DeepSeekProvider extends BaseProvider {
           // {"type":"error","content":"Messages too frequent...","finish_reason":"rate_limit_reached"}
           if (parsed?.type === 'error' && typeof parsed.content === 'string') {
             const code = parsed.finish_reason === 'rate_limit_reached' ? 'upstream_rate_limit' : parsed.finish_reason;
-            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code };
+            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code, sent };
             continue;
           }
 

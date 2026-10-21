@@ -305,6 +305,27 @@ describe('BrowserManager profile fallback', () => {
     },
   );
 
+  it('ignores a late close from a page of the previous context after failover', async () => {
+    const dead = fakePage();
+    const live = fakePage();
+    const camoufoxLaunch = vi.fn().mockResolvedValue(fakeContext(live));
+    const manager = makeManager(
+      { chrome: vi.fn().mockResolvedValue(fakeContext(dead)), camoufox: camoufoxLaunch },
+      { profile: work, resolveProfile: () => personal, hasSession: () => true },
+    );
+
+    await manager.getPageForOrigin('https://chat.deepseek.com');
+    dead.emit('close');
+    await expect(manager.getPageForOrigin('https://chat.deepseek.com')).resolves.toBe(live);
+    expect(manager.getStatus()).toBe('running');
+
+    // Playwright can deliver the old page's close after the next context is up.
+    dead.emit('close');
+    expect(manager.getStatus()).toBe('running');
+    await expect(manager.getPageForOrigin('https://chat.deepseek.com')).resolves.toBe(live);
+    expect(camoufoxLaunch).toHaveBeenCalledOnce();
+  });
+
   it('relaunches the same profile when a page dies and no fallback is declared', async () => {
     const first = fakePage();
     const second = fakePage();

@@ -258,7 +258,9 @@ export class BrowserManager {
     if (!page) {
       page = await ctx.newPage();
       const dead = () => {
-        if (this.releasing) return;
+        // Playwright can deliver a close after its context was replaced; only
+        // the context this page belongs to can mark the profile down.
+        if (this.releasing || this.context !== ctx) return;
         this._dead = true;
         this._status = 'stopped';
       };
