@@ -202,7 +202,7 @@ describe('Anthropic route as Claude Code agent backend', () => {
     const sentFailure = new CapturingProvider('');
     sentFailure.chat = async function* () {
       calls++;
-      yield { type: 'error', message: 'DeepSeek API error: upstream died', sent: true };
+      yield { type: 'error', message: 'DeepSeek API error: upstream died', possiblySent: true };
     };
     const res = await post(sentFailure, false);
     expect(calls).toBe(1);

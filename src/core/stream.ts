@@ -3,6 +3,6 @@ export type StreamEvent =
   | { type: 'thinking_delta'; delta: string }
   | { type: 'tool_call'; id: string; name: string; args: string }
   | { type: 'done'; reason: 'stop' | 'tool_use' | 'length' }
-  // `sent` is true once the prompt may have reached the provider: retrying
-  // such a failure could post the same message twice.
-  | { type: 'error'; message: string; code?: string; sent?: boolean };
+  // Set from the moment the prompt is posted: it may not have reached the
+  // provider, but retrying could post the same message twice. Absent = not sent.
+  | { type: 'error'; message: string; code?: string; possiblySent?: boolean };

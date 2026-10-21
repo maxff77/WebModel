@@ -44,6 +44,9 @@ export class KimiProvider extends BaseProvider {
       return;
     }
 
+    // From the chat POST on, the prompt may have reached Kimi.
+    let possiblySent = false;
+
     try {
       const page = this.getPage
         ? await this.getPage('https://www.kimi.com')
@@ -57,6 +60,7 @@ export class KimiProvider extends BaseProvider {
       const prompt = buildWebPrompt(req.messages, req.tools);
 
       // Kimi uses Connect RPC protocol with binary framing
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: { prompt: string }) => {
         try {
           // Get auth token from cookie or localStorage
@@ -157,7 +161,7 @@ export class KimiProvider extends BaseProvider {
       }, { prompt });
 
       if (sseResult.error) {
-        yield { type: 'error', message: `Kimi API error: ${sseResult.error}` };
+        yield { type: 'error', message: `Kimi API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -181,7 +185,7 @@ export class KimiProvider extends BaseProvider {
         }
       }
     } catch (err) {
-      yield { type: 'error', message: `Kimi provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `Kimi provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }

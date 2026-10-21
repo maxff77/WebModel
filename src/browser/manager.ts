@@ -140,7 +140,7 @@ export class BrowserManager {
   private _loginState: LoginState = { providerId: null, status: 'idle', message: '', startedAt: null };
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** A page closed or crashed; the next acquisition must not reuse this browser. */
-  private _dead = false;
+  private pageLost = false;
   private releasing = false;
 
   constructor(private opts: BrowserManagerOptions) {
@@ -154,12 +154,12 @@ export class BrowserManager {
    * In launch mode, launches a new persistent context.
    */
   async ensureBrowser(): Promise<BrowserContext> {
-    if (this._dead) {
-      // A closed or crashed page marks the profile down: the next acquisition
-      // moves to its declared fallback, or relaunches the same profile.
-      this._dead = false;
-      await this.release();
-      await this.switchToFallback('page closed or crashed');
+    if (this.pageLost) {
+      // A closed or crashed page marks the profile down. It stays down when
+      // the fallback cannot serve, so the next request keeps asking for login
+      // instead of silently retrying the profile that died.
+      await this.failOver(`Profile "${this._profile.name}" page closed or crashed`);
+      this.pageLost = false;
     }
 
     if (this.context) {
@@ -208,29 +208,29 @@ export class BrowserManager {
    * later requests. A fallback with no session cannot serve: fail clearly.
    */
   private async launchFallback(cause: Error): Promise<BrowserContext> {
-    const failed = this._profile;
-    await this.switchToFallback(`failed to start (${cause.message})`);
-    if (this._profile === failed) throw cause;
-    await this.release();
+    const summary = `Profile "${this._profile.name}" failed to start (${cause.message})`;
+    if (!(await this.failOver(summary))) throw cause;
     return this.launch(true);
   }
 
   /**
-   * Move to the profile's declared fallback. A fallback with no session cannot
-   * serve, so fail naming it. Without a fallback the current profile is kept.
+   * Release the current browser and move to the profile's declared fallback.
+   * Returns false when no fallback is declared (the caller keeps the profile).
+   * A fallback with no session cannot serve, so this throws naming it.
    */
-  private async switchToFallback(reason: string): Promise<void> {
+  private async failOver(summary: string): Promise<boolean> {
+    await this.release();
     const failed = this._profile;
     const fallbackName = failed.fallbackProfile;
     const fallback = fallbackName && fallbackName !== failed.name
       ? this.opts.resolveProfile?.(fallbackName)
       : undefined;
-    if (!fallback) return;
+    if (!fallback) return false;
 
     if (this.opts.hasSession && !this.opts.hasSession(fallback.name)) {
       throw new BrowserUnavailableError(
-        `Profile "${failed.name}" ${reason}. ` +
-        `Fallback profile "${fallback.name}" has no login: open the Dashboard and login as "${fallback.name}".`,
+        `${summary}. Fallback profile "${fallback.name}" has no login: ` +
+        `open the Dashboard and login as "${fallback.name}".`,
       );
     }
 
@@ -238,6 +238,7 @@ export class BrowserManager {
     // Failover always launches the fallback: it is another identity, never the
     // user's own Chrome, so attach semantics do not apply.
     this._mode = 'launch';
+    return true;
   }
 
   // Cache: domain → page (avoid re-navigating for same domain)
@@ -257,15 +258,15 @@ export class BrowserManager {
 
     if (!page) {
       page = await ctx.newPage();
-      const dead = () => {
+      const onPageLost = () => {
         // Playwright can deliver a close after its context was replaced; only
         // the context this page belongs to can mark the profile down.
         if (this.releasing || this.context !== ctx) return;
-        this._dead = true;
+        this.pageLost = true;
         this._status = 'stopped';
       };
-      page.on('close', dead);
-      page.on('crash', dead);
+      page.on('close', onPageLost);
+      page.on('crash', onPageLost);
       try {
         await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch {

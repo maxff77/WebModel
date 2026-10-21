@@ -9,7 +9,8 @@ export async function* readSSE(
   normalize: (line: string) => StreamEvent[],
 ): AsyncIterable<StreamEvent> {
   if (!response.body) {
-    yield { type: 'error', message: 'No response body' };
+    // Reaching here means the prompt POST already happened.
+    yield { type: 'error', message: 'No response body', possiblySent: true };
     return;
   }
 
@@ -40,5 +41,20 @@ export async function* readSSE(
     for (const event of events) {
       yield event;
     }
+  }
+}
+
+/**
+ * POST the prompt and stream the reply. The request may have reached the
+ * provider once it is attempted, so failures from here are never retried.
+ */
+export async function* postAndRead(
+  send: () => Promise<Response>,
+  normalize: (line: string) => StreamEvent[],
+): AsyncIterable<StreamEvent> {
+  try {
+    yield* readSSE(await send(), normalize);
+  } catch (err) {
+    yield { type: 'error', message: (err as Error).message, possiblySent: true };
   }
 }

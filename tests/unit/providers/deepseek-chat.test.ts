@@ -61,14 +61,14 @@ describe('DeepSeekProvider.chat SSE handling', () => {
       + 'event: hint\ndata: {"type":"error","content":"Messages too frequent. Try again later.","clear_response":true,"finish_reason":"rate_limit_reached"}\n\n'
       + 'event: close\ndata: {"click_behavior":"retry","auto_resume":false}\n\n';
     expect(await events(providerWithSse(sse))).toEqual([
-      { type: 'error', message: 'DeepSeek: Messages too frequent. Try again later.', code: 'upstream_rate_limit', sent: true },
+      { type: 'error', message: 'DeepSeek: Messages too frequent. Try again later.', code: 'upstream_rate_limit', possiblySent: true },
     ]);
   });
 
-  it('marks a non-rate-limit refusal hint as sent so it is not re-posted', async () => {
+  it('marks a non-rate-limit refusal hint as possibly sent so it is not re-posted', async () => {
     const sse = 'event: hint\ndata: {"type":"error","content":"Blocked by policy.","finish_reason":"content_filter"}\n\n';
     expect(await events(providerWithSse(sse))).toEqual([
-      { type: 'error', message: 'DeepSeek: Blocked by policy.', code: 'content_filter', sent: true },
+      { type: 'error', message: 'DeepSeek: Blocked by policy.', code: 'content_filter', possiblySent: true },
     ]);
   });
 
@@ -118,14 +118,14 @@ describe('DeepSeekProvider.chat SSE handling', () => {
 });
 
 describe('DeepSeekProvider send boundary', () => {
-  it('marks a failure after the completion request as sent, so the route will not retry it', async () => {
+  it('marks a failure after the completion request as possibly sent, so the route will not retry it', async () => {
     const provider = providerWithReplies([
       { data: createReply },
       powReply,
       { error: 'HTTP 500: upstream died' },
     ]);
     expect(await events(provider)).toEqual([
-      { type: 'error', message: 'DeepSeek API error: HTTP 500: upstream died', sent: true },
+      { type: 'error', message: 'DeepSeek API error: HTTP 500: upstream died', possiblySent: true },
     ]);
   });
 

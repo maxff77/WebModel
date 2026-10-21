@@ -52,6 +52,9 @@ export class ClaudeProvider extends BaseProvider {
       return;
     }
 
+    // From the completion POST on, the prompt may have reached claude.ai.
+    let possiblySent = false;
+
     try {
       const page = await this.getPage(BASE_URL);
 
@@ -125,6 +128,7 @@ export class ClaudeProvider extends BaseProvider {
       const prompt = buildWebPrompt(req.messages, req.tools);
 
       // Step 4: Send message and read SSE response
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: {
         apiBase: string; orgId: string; convId: string; deviceId: string;
         prompt: string; model: string;
@@ -187,7 +191,7 @@ export class ClaudeProvider extends BaseProvider {
       });
 
       if (sseResult.error) {
-        yield { type: 'error', message: `Claude API error: ${sseResult.error}` };
+        yield { type: 'error', message: `Claude API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -203,7 +207,7 @@ export class ClaudeProvider extends BaseProvider {
       }
 
     } catch (err) {
-      yield { type: 'error', message: `Claude provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `Claude provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }

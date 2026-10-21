@@ -1,7 +1,7 @@
 import { BaseProvider, type ProviderInfo, type ModelInfo, type ChatRequest, buildWebPrompt } from '../../core/provider.js';
 import type { StreamEvent } from '../../core/stream.js';
 import { normalizeStandardSSE } from '../_shared/standard-stream.js';
-import { readSSE } from '../_shared/sse-reader.js';
+import { postAndRead } from '../_shared/sse-reader.js';
 import { GROK_WEB_BASE_URL } from './client.js';
 import { AuthStore } from '../../auth/store.js';
 
@@ -45,16 +45,17 @@ export class GrokProvider extends BaseProvider {
       return;
     }
 
-    const response = await this.browserFetch(`${GROK_WEB_BASE_URL}/api/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: req.model,
-        messages: [{ role: 'user', content: buildWebPrompt(req.messages, req.tools) }],
-        stream: true,
+    yield* postAndRead(
+      () => this.browserFetch!(`${GROK_WEB_BASE_URL}/api/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: req.model,
+          messages: [{ role: 'user', content: buildWebPrompt(req.messages, req.tools) }],
+          stream: true,
+        }),
       }),
-    });
-
-    yield* readSSE(response, normalizeStandardSSE);
+      normalizeStandardSSE,
+    );
   }
 }

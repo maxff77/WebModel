@@ -108,8 +108,8 @@ export class DeepSeekProvider extends BaseProvider {
     }
 
     // From the completion POST on, DeepSeek may have the prompt: failures are
-    // reported as sent so the route does not post it a second time.
-    let sent = false;
+    // reported as possibly sent so the route does not post it a second time.
+    let possiblySent = false;
 
     try {
       const page = await this.getPage(DEEPSEEK_WEB_BASE_URL);
@@ -249,7 +249,7 @@ export class DeepSeekProvider extends BaseProvider {
       const isThinking = req.thinking || req.model.includes('reasoner');
 
       // Step 6: Send message with PoW header, read SSE
-      sent = true;
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: {
         sessionId: string; prompt: string; powResponse: string; thinkingEnabled: boolean;
         headers: Record<string, string>;
@@ -304,7 +304,7 @@ export class DeepSeekProvider extends BaseProvider {
 
       if (sseResult.error) {
         this.forgetExpiredBearer(sseResult.error);
-        yield { type: 'error', message: `DeepSeek API error: ${sseResult.error}`, sent };
+        yield { type: 'error', message: `DeepSeek API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -371,7 +371,7 @@ export class DeepSeekProvider extends BaseProvider {
           // {"type":"error","content":"Messages too frequent...","finish_reason":"rate_limit_reached"}
           if (parsed?.type === 'error' && typeof parsed.content === 'string') {
             const code = parsed.finish_reason === 'rate_limit_reached' ? 'upstream_rate_limit' : parsed.finish_reason;
-            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code, sent };
+            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code, possiblySent };
             continue;
           }
 
@@ -406,7 +406,7 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
     } catch (err) {
-      yield { type: 'error', message: `DeepSeek provider error: ${(err as Error).message}`, sent };
+      yield { type: 'error', message: `DeepSeek provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }

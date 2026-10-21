@@ -57,6 +57,9 @@ export class GLMProvider extends BaseProvider {
       return;
     }
 
+    // From the stream POST on, the prompt may have reached GLM.
+    let possiblySent = false;
+
     try {
       const page = this.getPage
         ? await this.getPage(GLM_WEB_BASE_URL)
@@ -74,6 +77,7 @@ export class GLMProvider extends BaseProvider {
       const nonce = crypto.randomUUID();
       const sign = generateSign(timestamp, nonce);
 
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: {
         assistantId: string; prompt: string;
         timestamp: string; nonce: string; sign: string;
@@ -146,7 +150,7 @@ export class GLMProvider extends BaseProvider {
       }, { assistantId, prompt, timestamp, nonce, sign });
 
       if (sseResult.error) {
-        yield { type: 'error', message: `GLM API error: ${sseResult.error}` };
+        yield { type: 'error', message: `GLM API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -173,7 +177,7 @@ export class GLMProvider extends BaseProvider {
         }
       }
     } catch (err) {
-      yield { type: 'error', message: `GLM provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `GLM provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }

@@ -46,6 +46,9 @@ export class QwenProvider extends BaseProvider {
       return;
     }
 
+    // From the completion POST on, the prompt may have reached Qwen.
+    let possiblySent = false;
+
     try {
       const page = this.getPage
         ? await this.getPage(QWEN_WEB_BASE_URL)
@@ -89,6 +92,7 @@ export class QwenProvider extends BaseProvider {
       const fid = crypto.randomUUID();
 
       // Step 3: Send completion request
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: {
         chatId: string; prompt: string; model: string; fid: string;
       }) => {
@@ -153,7 +157,7 @@ export class QwenProvider extends BaseProvider {
       });
 
       if (sseResult.error) {
-        yield { type: 'error', message: `Qwen API error: ${sseResult.error}` };
+        yield { type: 'error', message: `Qwen API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -178,7 +182,7 @@ export class QwenProvider extends BaseProvider {
         }
       }
     } catch (err) {
-      yield { type: 'error', message: `Qwen provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `Qwen provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }

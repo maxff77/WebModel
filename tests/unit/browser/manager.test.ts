@@ -345,10 +345,11 @@ describe('BrowserManager profile fallback', () => {
     expect(launch).toHaveBeenCalledTimes(2);
   });
 
-  it('names the fallback profile and asks for login when a page dies and it has no session', async () => {
+  it('keeps the profile down when the fallback has no session', async () => {
     const dead = fakePage();
+    const chromeLaunch = vi.fn().mockResolvedValue(fakeContext(dead));
     const manager = makeManager(
-      { chrome: vi.fn().mockResolvedValue(fakeContext(dead)), camoufox: vi.fn() },
+      { chrome: chromeLaunch, camoufox: vi.fn() },
       { profile: work, resolveProfile: () => personal, hasSession: () => false },
     );
 
@@ -358,6 +359,12 @@ describe('BrowserManager profile fallback', () => {
     await expect(manager.getPageForOrigin('https://chat.deepseek.com')).rejects.toThrow(
       /profile "personal".*login/i,
     );
+    // Still asking for login on the next request, not silently retrying the
+    // profile whose page died.
+    await expect(manager.getPageForOrigin('https://chat.deepseek.com')).rejects.toThrow(
+      /profile "personal".*login/i,
+    );
+    expect(chromeLaunch).toHaveBeenCalledOnce();
   });
 });
 

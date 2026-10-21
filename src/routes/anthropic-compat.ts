@@ -24,6 +24,16 @@ import { buildWebPrompt, estimateTokens, type Message, type ToolDef } from '../c
 /** Cooldown when the provider answers "too frequent"; exported for tests. */
 export const rateLimitCooldown = { firstWaitMs: 5_000, maxWaitMs: 180_000 };
 
+/** One provider call and what the route needs to decide whether to retry it. */
+interface AttemptResult {
+  text: string;
+  thinking: string;
+  error: string | null;
+  code?: string;
+  stopReason: string;
+  possiblySent: boolean;
+}
+
 export function anthropicRoutes(registry: ProviderRegistry, queue = new ProviderQueue(requestPacing)): Hono {
   const app = new Hono();
 
@@ -74,25 +84,25 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     const disconnected = () =>
       c.json({ type: 'error', error: { type: 'api_error', message: 'client disconnected' } }, 499 as any);
 
-    async function attempt() {
-      let text = '';
-      let thinking = '';
-      let error: string | null = null;
-      let code: string | undefined;
-      let sent = false;
-      let stopReason = 'end_turn';
-      if (signal.aborted) return { text, thinking, error: 'client disconnected', code: 'aborted', stopReason, sent };
+    async function attempt(): Promise<AttemptResult> {
+      const reply: AttemptResult = {
+        text: '', thinking: '', error: null, stopReason: 'end_turn', possiblySent: false,
+      };
+      if (signal.aborted) return { ...reply, error: 'client disconnected', code: 'aborted' };
       try {
         for await (const event of provider.chat({ model, messages, tools, thinking: wantThinking, stream: body.stream === true, signal })) {
-          if (event.type === 'text_delta') text += event.delta;
-          else if (event.type === 'thinking_delta') thinking += event.delta;
-          else if (event.type === 'error') { error = event.message; code = event.code; sent = event.sent === true; }
-          else if (event.type === 'done') stopReason = streamEventToStopReason(event) ?? 'end_turn';
+          if (event.type === 'text_delta') reply.text += event.delta;
+          else if (event.type === 'thinking_delta') reply.thinking += event.delta;
+          else if (event.type === 'error') {
+            reply.error = event.message;
+            reply.code = event.code;
+            reply.possiblySent = event.possiblySent === true;
+          } else if (event.type === 'done') reply.stopReason = streamEventToStopReason(event) ?? 'end_turn';
         }
       } catch (err) {
-        error = (err as Error).message;
+        reply.error = (err as Error).message;
       }
-      return { text, thinking, error, code, stopReason, sent };
+      return reply;
     }
 
     const failed = (r: Awaited<ReturnType<typeof attempt>>) => r.error && !r.text && !r.thinking;
@@ -117,7 +127,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     const run = () => queue.enqueue(provider.info.id, paced, signal);
     let reply = await run();
     if (signal.aborted) return disconnected();
-    if (failed(reply) && !reply.sent && reply.code !== 'upstream_rate_limit') reply = await run();
+    if (failed(reply) && !reply.possiblySent && reply.code !== 'upstream_rate_limit') reply = await run();
     if (signal.aborted) return disconnected();
 
     // Nothing usable: answer like the real API does, so Claude Code retries

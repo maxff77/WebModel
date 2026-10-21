@@ -47,6 +47,9 @@ export class DoubaoProvider extends BaseProvider {
       return;
     }
 
+    // From the completion POST on, the prompt may have reached Doubao.
+    let possiblySent = false;
+
     try {
       const page = this.getPage
         ? await this.getPage(DOUBAO_WEB_BASE_URL)
@@ -59,6 +62,7 @@ export class DoubaoProvider extends BaseProvider {
 
       const prompt = buildWebPrompt(req.messages, req.tools);
 
+      possiblySent = true;
       const sseResult = await page.evaluate(async (args: {
         queryParams: string; prompt: string;
       }) => {
@@ -121,7 +125,7 @@ export class DoubaoProvider extends BaseProvider {
       });
 
       if (sseResult.error) {
-        yield { type: 'error', message: `Doubao API error: ${sseResult.error}` };
+        yield { type: 'error', message: `Doubao API error: ${sseResult.error}`, possiblySent };
         return;
       }
 
@@ -169,11 +173,11 @@ export class DoubaoProvider extends BaseProvider {
           }
         } else if (trimmed.startsWith('event: gateway-error')) {
           // Error from gateway
-          yield { type: 'error', message: 'Doubao gateway error' };
+          yield { type: 'error', message: 'Doubao gateway error', possiblySent };
         }
       }
     } catch (err) {
-      yield { type: 'error', message: `Doubao provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `Doubao provider error: ${(err as Error).message}`, possiblySent };
     }
   }
 }
