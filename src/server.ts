@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { openaiRoutes } from './routes/openai-compat.js';
 import { anthropicRoutes } from './routes/anthropic-compat.js';
+import { ProviderQueue, requestPacing } from './core/queue.js';
 import { managementRoutes, type ManagementDeps, type ProfilesApi } from './routes/management.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
@@ -66,9 +67,10 @@ export function createApp(opts: AppOptions): Hono {
     }
   });
 
-  // Mount API routes
-  app.route('/', openaiRoutes(opts.registry));
-  app.route('/', anthropicRoutes(opts.registry));
+  // Mount API routes. One queue per app so both surfaces share the provider lane.
+  const providerQueue = new ProviderQueue(requestPacing);
+  app.route('/', openaiRoutes(opts.registry, providerQueue));
+  app.route('/', anthropicRoutes(opts.registry, providerQueue));
 
   const mgmtDeps: ManagementDeps = {
     registry: opts.registry,

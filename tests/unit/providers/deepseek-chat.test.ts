@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { DeepSeekProvider } from '../../../src/providers/deepseek/index.js';
+import { DEEPSEEK_DEVICE_ID_KEY } from '../../../src/providers/deepseek/client.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 
 // Captured verbatim from chat.deepseek.com on 2026-10-20: the id moved into
@@ -10,11 +11,35 @@ const createReply = {
 };
 const powReply = { challenge: { algorithm: 'sha256', challenge: 'c', difficulty: 4, salt: 's', signature: 'sig' } };
 
-// Fake tab: answers the provider's in-page fetches in order.
-function providerWithReplies(replies: unknown[]) {
-  const page = { evaluate: async () => replies.shift() };
+// Fake tab: answers the provider's in-page fetches in order and captures the
+// bearer the real page sends after a reload.
+function fakePage(replies: unknown[]) {
+  const handlers: Array<(req: any) => void> = [];
+  let reloads = 0;
+  const page = {
+    on: (event: string, h: (req: any) => void) => { if (event === 'request') handlers.push(h); },
+    off: (event: string, h: (req: any) => void) => {
+      const i = handlers.indexOf(h);
+      if (i >= 0) handlers.splice(i, 1);
+    },
+    reload: async () => {
+      reloads++;
+      for (const h of [...handlers]) h({
+        url: () => 'https://chat.deepseek.com/api/v0/chat_session/fetch_page',
+        headers: () => ({ authorization: 'Bearer from-page' }),
+      });
+    },
+    // The device-id read is the only evaluate with the localStorage key as its arg.
+    evaluate: async (_fn: unknown, arg?: unknown) =>
+      arg === DEEPSEEK_DEVICE_ID_KEY ? 'test-device' : replies.shift(),
+  };
+  return { page, reloads: () => reloads };
+}
+
+function providerWithReplies(replies: unknown[], bearer: string | null = 'test') {
+  const { page } = fakePage(replies);
   const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
-  provider.setBearerToken('test');
+  if (bearer) provider.setBearerToken(bearer);
   return provider;
 }
 
@@ -103,5 +128,36 @@ describe('DeepSeekProvider session create', () => {
     expect(await events(provider)).toEqual([
       { type: 'error', message: 'DeepSeek session create failed: 40003: INVALID_TOKEN' },
     ]);
+  });
+
+  it('captures the bearer once instead of reloading the page on every call', async () => {
+    const sse = 'data: {"p":"response/content","v":"hi"}\n\ndata: {"p":"response/status","v":"FINISHED"}\n\n';
+    const replies = [
+      { data: createReply }, powReply, { data: sse },
+      { data: createReply }, powReply, { data: sse },
+    ];
+    const { page, reloads } = fakePage(replies);
+    const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
+
+    await events(provider);
+    await events(provider);
+    expect(reloads()).toBe(1);
+  });
+
+  it('reloads after an INVALID_TOKEN envelope instead of reusing the dead bearer', async () => {
+    const sse = 'data: {"p":"response/content","v":"hi"}\n\ndata: {"p":"response/status","v":"FINISHED"}\n\n';
+    const replies = [
+      { data: { code: 40003, msg: 'INVALID_TOKEN', data: null } },
+      { data: createReply }, powReply, { data: sse },
+    ];
+    const { page, reloads } = fakePage(replies);
+    const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
+
+    expect((await events(provider))[0]).toMatchObject({ type: 'error' });
+    expect(await events(provider)).toEqual([
+      { type: 'text_delta', delta: 'hi' },
+      { type: 'done', reason: 'stop' },
+    ]);
+    expect(reloads()).toBe(2);
   });
 });

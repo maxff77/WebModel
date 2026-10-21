@@ -1,7 +1,35 @@
+export interface QueueOptions {
+  /** Minimum delay between the start of two calls to the same provider. */
+  minGapMs?: number;
+  /** Maximum calls started per rolling window, per provider. */
+  maxPerWindow?: number;
+  /** Rolling window for maxPerWindow. */
+  windowMs?: number;
+}
+
+function envNumber(raw: string | undefined, fallback: number, min: number): number {
+  const n = Number(raw);
+  return raw?.trim() && Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+/**
+ * Start-rate pacing per provider, separate from the 429 cooldown in the route.
+ * One model call costs 3 upstream HTTP requests; 20 starts/min leaves typical
+ * 3-9 call/min sessions uncapped, while the 1s gap adds up to 1s to sub-second
+ * follow-ups (measured +0.4s average). Env-overridable without a rebuild.
+ */
+export const requestPacing: QueueOptions = {
+  minGapMs: envNumber(process.env.WMB_MIN_GAP_MS, 1_000, 0),
+  maxPerWindow: envNumber(process.env.WMB_MAX_RPM, 20, 1),
+};
+
 export class ProviderQueue {
   private queues = new Map<string, Promise<void>>();
+  private starts = new Map<string, number[]>();
 
-  async enqueue<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
+  constructor(private readonly options: QueueOptions = {}) {}
+
+  async enqueue<T>(providerId: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const prev = this.queues.get(providerId) ?? Promise.resolve();
 
     let resolve!: () => void;
@@ -10,10 +38,44 @@ export class ProviderQueue {
 
     try {
       await prev; // Wait for previous request to complete
+      await this.waitForSlot(providerId, signal);
       return await fn();
     } finally {
       resolve();
     }
+  }
+
+  private async waitForSlot(providerId: string, signal?: AbortSignal): Promise<void> {
+    const { minGapMs = 0, maxPerWindow, windowMs = 60_000 } = this.options;
+    const now = Date.now();
+    const recent = (this.starts.get(providerId) ?? []).filter(t => t > now - windowMs);
+
+    let wait = 0;
+    const last = recent.at(-1);
+    if (last !== undefined) wait = Math.max(wait, last + minGapMs - now);
+    if (maxPerWindow !== undefined && recent.length >= maxPerWindow) {
+      // Wait until the oldest call still inside the window leaves it.
+      wait = Math.max(wait, recent[recent.length - maxPerWindow] + windowMs - now);
+    }
+
+    if (wait > 0) await this.sleep(wait, signal);
+    // Aborted while queued: don't spend a slot; fn() sees the signal and bails.
+    if (signal?.aborted) return;
+    recent.push(Date.now());
+    this.starts.set(providerId, recent);
+  }
+
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal?.addEventListener('abort', done, { once: true });
+    });
   }
 
   get pendingCount(): number {

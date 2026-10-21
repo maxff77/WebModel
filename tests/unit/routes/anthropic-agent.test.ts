@@ -3,7 +3,7 @@ import { createTestContext, type TestContext } from '../../helpers/test-server.j
 import { BaseProvider, buildWebPrompt, estimateTokens, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { parseToolCalls } from '../../../src/core/tool-protocol.js';
-import { rateLimitPacing } from '../../../src/routes/anthropic-compat.js';
+import { rateLimitCooldown } from '../../../src/routes/anthropic-compat.js';
 import { encode } from 'gpt-tokenizer';
 
 // Shape of what DeepSeek Web emits when it decides to call a tool (DSML).
@@ -67,8 +67,8 @@ const claudeCodeBody = (stream: boolean) => ({
 
 describe('Anthropic route as Claude Code agent backend', () => {
   let ctx: TestContext;
-  const pacing = { ...rateLimitPacing };
-  afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitPacing, pacing); });
+  const pacing = { ...rateLimitCooldown };
+  afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitCooldown, pacing); });
 
   async function post(provider: CapturingProvider, stream: boolean, extra: object = {}, path = '/v1/messages') {
     ctx = createTestContext({ providers: [provider as any] });
@@ -208,7 +208,7 @@ describe('Anthropic route as Claude Code agent backend', () => {
   });
 
   it('persistent rate limit becomes a 429 rate_limit_error once the cooldown budget is spent', async () => {
-    Object.assign(rateLimitPacing, { firstWaitMs: 10, maxWaitMs: 25 });
+    Object.assign(rateLimitCooldown, { firstWaitMs: 10, maxWaitMs: 25 });
     let calls = 0;
     const limited = new CapturingProvider('');
     limited.chat = async function* () {
@@ -239,7 +239,7 @@ describe('Anthropic route as Claude Code agent backend', () => {
   });
 
   it('client leaves during a rate-limit cooldown: the 5 s wait is cut and no retry is sent', async () => {
-    Object.assign(rateLimitPacing, { firstWaitMs: 5_000, maxWaitMs: 60_000 });
+    Object.assign(rateLimitCooldown, { firstWaitMs: 5_000, maxWaitMs: 60_000 });
     let calls = 0;
     const limited = new CapturingProvider('');
     limited.chat = async function* () {
@@ -263,7 +263,7 @@ describe('Anthropic route as Claude Code agent backend', () => {
   });
 
   it('rate limit holds the provider lane and retries after a cooldown, so parallel subagents all succeed', async () => {
-    Object.assign(rateLimitPacing, { firstWaitMs: 30, maxWaitMs: 1_000 });
+    Object.assign(rateLimitCooldown, { firstWaitMs: 30, maxWaitMs: 1_000 });
     const starts: number[] = [];
     const deepseek = new CapturingProvider('ok');
     deepseek.chat = async function* () {

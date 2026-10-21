@@ -16,17 +16,16 @@ import {
   type AnthropicContentBlock,
 } from '../core/anthropic-formatter.js';
 import { dsmlShape, parseToolCalls, renderToolCalls } from '../core/tool-protocol.js';
-import { ProviderQueue } from '../core/queue.js';
+import { ProviderQueue, requestPacing } from '../core/queue.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import { buildWebPrompt, estimateTokens, type Message, type ToolDef } from '../core/provider.js';
 
 /** Cooldown when the provider answers "too frequent"; exported for tests. */
-export const rateLimitPacing = { firstWaitMs: 5_000, maxWaitMs: 180_000 };
+export const rateLimitCooldown = { firstWaitMs: 5_000, maxWaitMs: 180_000 };
 
-export function anthropicRoutes(registry: ProviderRegistry): Hono {
+export function anthropicRoutes(registry: ProviderRegistry, queue = new ProviderQueue(requestPacing)): Hono {
   const app = new Hono();
-  const queue = new ProviderQueue();
 
   app.post('/v1/messages', async (c) => {
     let body: any;
@@ -101,10 +100,10 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
     // Waiting inside the lane also holds back every queued request (other subagents);
     // a 429 at once let each agent retry on its own and hit the limit again.
     async function paced() {
-      for (let wait = rateLimitPacing.firstWaitMs, waited = 0; ; waited += wait, wait *= 2) {
+      for (let wait = rateLimitCooldown.firstWaitMs, waited = 0; ; waited += wait, wait *= 2) {
         const r = await attempt();
         if (signal.aborted) return r;
-        if (!(failed(r) && r.code === 'upstream_rate_limit') || waited + wait > rateLimitPacing.maxWaitMs) return r;
+        if (!(failed(r) && r.code === 'upstream_rate_limit') || waited + wait > rateLimitCooldown.maxWaitMs) return r;
         console.warn(`[${provider.info.id}] ${new Date().toISOString()} rate limited, retrying in ${wait / 1000}s`);
         // Abort cuts the cooldown so the lane is released to the next request.
         try { await sleep(wait, undefined, { signal }); } catch { return r; }
@@ -113,7 +112,7 @@ export function anthropicRoutes(registry: ProviderRegistry): Hono {
 
     // Web providers drive one shared browser tab, so requests run one at a time;
     // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
-    const run = () => queue.enqueue(provider.info.id, paced);
+    const run = () => queue.enqueue(provider.info.id, paced, signal);
     let reply = await run();
     if (signal.aborted) return disconnected();
     if (failed(reply) && reply.code !== 'upstream_rate_limit') reply = await run();

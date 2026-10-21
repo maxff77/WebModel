@@ -10,8 +10,9 @@ import {
 import { AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import type { Message } from '../core/provider.js';
 import type { StreamEvent } from '../core/stream.js';
+import { ProviderQueue } from '../core/queue.js';
 
-export function openaiRoutes(registry: ProviderRegistry): Hono {
+export function openaiRoutes(registry: ProviderRegistry, queue = new ProviderQueue()): Hono {
   const app = new Hono();
 
   app.post('/v1/chat/completions', async (c) => {
@@ -60,11 +61,13 @@ export function openaiRoutes(registry: ProviderRegistry): Hono {
       return stream(c, async (s) => {
         let isFirst = true;
         try {
-          for await (const event of provider.chat({ model, messages, stream: true })) {
-            const chunk = formatStreamChunk(runId, body.model, event, isFirst);
-            await s.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            isFirst = false;
-          }
+          await queue.enqueue(provider.info.id, async () => {
+            for await (const event of provider.chat({ model, messages, stream: true })) {
+              const chunk = formatStreamChunk(runId, body.model, event, isFirst);
+              await s.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              isFirst = false;
+            }
+          }, c.req.raw.signal);
           await s.write(`data: ${formatDoneChunk()}\n\n`);
         } catch (err) {
           const errEvent: StreamEvent = {
@@ -81,13 +84,15 @@ export function openaiRoutes(registry: ProviderRegistry): Hono {
     // Non-streaming
     let fullContent = '';
     let lastError: string | null = null;
-    for await (const event of provider.chat({ model, messages, stream: false })) {
-      if (event.type === 'text_delta') {
-        fullContent += event.delta;
-      } else if (event.type === 'error') {
-        lastError = event.message;
+    await queue.enqueue(provider.info.id, async () => {
+      for await (const event of provider.chat({ model, messages, stream: false })) {
+        if (event.type === 'text_delta') {
+          fullContent += event.delta;
+        } else if (event.type === 'error') {
+          lastError = event.message;
+        }
       }
-    }
+    }, c.req.raw.signal);
     if (fullContent.length === 0 && lastError) {
       return c.json({
         error: { message: lastError, type: 'provider_error', code: 'provider_error' },

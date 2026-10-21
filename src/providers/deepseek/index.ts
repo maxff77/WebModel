@@ -2,7 +2,12 @@ import { BaseProvider, type ProviderInfo, type ModelInfo, type ChatRequest, buil
 import type { StreamEvent } from '../../core/stream.js';
 
 import { solvePow, buildPowResponse, type DeepSeekPowChallenge } from './pow.js';
-import { DEEPSEEK_WEB_BASE_URL } from './client.js';
+import {
+  DEEPSEEK_WEB_BASE_URL,
+  DEEPSEEK_DEVICE_ID_KEY,
+  deepseekClientHeaders,
+  pickClientHeaders,
+} from './client.js';
 import { AuthStore } from '../../auth/store.js';
 import type { Page } from 'playwright-core';
 
@@ -53,6 +58,7 @@ export class DeepSeekProvider extends BaseProvider {
   };
 
   private bearerToken: string | null = null;
+  private clientHeaders: Record<string, string> | null = null;
 
   constructor(
     private authStore: AuthStore,
@@ -65,6 +71,15 @@ export class DeepSeekProvider extends BaseProvider {
   /** Set a bearer token for API authentication (e.g. from OpenClaw auth-profiles) */
   setBearerToken(token: string): void {
     this.bearerToken = token;
+  }
+
+  /**
+   * Auth failures arrive as HTTP 401/403 or as the web API's HTTP 200 envelope
+   * {code:40003,msg:"INVALID_TOKEN"}; either way the cached bearer is dead.
+   * Clearing it makes the next chat() reload and capture a fresh one.
+   */
+  private forgetExpiredBearer(message: string): void {
+    if (/\b(?:401|403|40003)\b|INVALID_TOKEN/.test(message)) this.bearerToken = null;
   }
 
   async login(context: { openUrl: (url: string) => Promise<void> }): Promise<void> {
@@ -94,43 +109,73 @@ export class DeepSeekProvider extends BaseProvider {
 
     try {
       const page = await this.getPage(DEEPSEEK_WEB_BASE_URL);
+      let clientHeaders = this.clientHeaders;
+      if (!clientHeaders) {
+        const deviceId = await page
+          .evaluate((key) => localStorage.getItem(key), DEEPSEEK_DEVICE_ID_KEY)
+          .catch(() => null);
+        if (!deviceId) {
+          console.warn(`[deepseek-web] ${DEEPSEEK_DEVICE_ID_KEY} unavailable; requests will omit x-device-id`);
+        }
+        clientHeaders = deepseekClientHeaders(deviceId);
+      }
 
-      // Step 1: Extract bearer token
-      // DeepSeek stores JWT in a cookie named "ds_chat_token" or via login response.
-      // Strategy: try /api/v0/users/current with cookies → intercept from page.
+      // Step 1: Extract bearer token and the web client's identity headers.
+      // DeepSeek's frontend adds both to its own /api/v0 requests; reload once and
+      // copy what the real client sends instead of trusting hardcoded values.
       let bearer = this.bearerToken;
       if (!bearer) {
-        // Primary method: Intercept request headers by reloading the page.
-        // DeepSeek's frontend JS adds the Authorization header from its own state.
+        let identity: Record<string, string> | null = null;
+        let resolveIdentity!: (value: Record<string, string> | null) => void;
+        const identityPromise = new Promise<Record<string, string> | null>((resolve) => {
+          resolveIdentity = resolve;
+        });
         const tokenPromise = new Promise<string | null>((resolve) => {
-          const timeout = setTimeout(() => resolve(null), 10000);
+          const timeout = setTimeout(() => {
+            resolveIdentity(identity);
+            resolve(null);
+          }, 10000);
           const handler = (request: any) => {
             const url = request.url() as string;
-            if (url.includes('/api/v0/')) {
-              const auth = request.headers()['authorization'] as string | undefined;
-              if (auth?.startsWith('Bearer ')) {
-                clearTimeout(timeout);
-                page.off('request', handler);
-                resolve(auth.slice(7));
-              }
+            if (!url.includes('/api/v0/')) return;
+            const headers = request.headers() as Record<string, string | undefined>;
+            const picked = pickClientHeaders(headers);
+            if (Object.keys(picked).length > 0) identity = { ...identity, ...picked };
+            const auth = headers['authorization'];
+            if (auth?.startsWith('Bearer ')) {
+              clearTimeout(timeout);
+              page.off('request', handler);
+              resolveIdentity(identity);
+              resolve(auth.slice(7));
             }
           };
           page.on('request', handler);
         });
-        // Reload the page — DeepSeek frontend will fire API calls with Bearer token
+        // Reload the page — DeepSeek frontend will fire API calls with both headers.
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
         bearer = await tokenPromise;
+        if (bearer) this.bearerToken = bearer;
+        const captured = await identityPromise;
+        if (captured) {
+          clientHeaders = { ...clientHeaders, ...captured };
+          this.clientHeaders = clientHeaders;
+        }
       }
       if (!bearer) {
         yield { type: 'error', message: 'DeepSeek: could not extract bearer token. Please re-login at chat.deepseek.com' };
         return;
       }
 
+      // One identity header set for every /api/v0 call; auth is the only per-request part.
+      const apiHeaders: Record<string, string> = {
+        ...clientHeaders,
+        Authorization: `Bearer ${bearer}`,
+      };
+
       // Step 2: Create chat session
-      const sessionResult = await page.evaluate(async (bearerToken: string | null) => {
+      const sessionResult = await page.evaluate(async (apiHeaders: Record<string, string>) => {
         try {
-          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          if (bearerToken) headers['Authorization'] = `Bearer ${bearerToken}`;
+          const headers: Record<string, string> = { ...apiHeaders, 'Content-Type': 'application/json' };
           const res = await fetch('/api/v0/chat_session/create', {
             method: 'POST',
             headers,
@@ -145,10 +190,11 @@ export class DeepSeekProvider extends BaseProvider {
         } catch (e: any) {
           return { error: e.message };
         }
-      }, bearer);
+      }, apiHeaders);
       const session = sessionCreateResult(sessionResult);
 
       if (session.kind === 'error') {
+        this.forgetExpiredBearer(session.message);
         yield { type: 'error', message: `DeepSeek session create failed: ${session.message}` };
         return;
       }
@@ -158,10 +204,9 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
       // Step 3: Get PoW challenge
-      const challengeResult = await page.evaluate(async (bearerToken: string | null) => {
+      const challengeResult = await page.evaluate(async (apiHeaders: Record<string, string>) => {
         try {
-          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          if (bearerToken) headers['Authorization'] = `Bearer ${bearerToken}`;
+          const headers: Record<string, string> = { ...apiHeaders, 'Content-Type': 'application/json' };
           const res = await fetch('/api/v0/chat/create_pow_challenge', {
             method: 'POST',
             headers,
@@ -175,9 +220,10 @@ export class DeepSeekProvider extends BaseProvider {
         } catch (e: any) {
           return { error: e.message };
         }
-      }, bearer);
+      }, apiHeaders);
 
       if (challengeResult.error || !challengeResult.challenge) {
+        if (challengeResult.error) this.forgetExpiredBearer(challengeResult.error);
         yield { type: 'error', message: `DeepSeek PoW challenge failed: ${challengeResult.error || 'no challenge'}` };
         return;
       }
@@ -200,14 +246,15 @@ export class DeepSeekProvider extends BaseProvider {
 
       // Step 6: Send message with PoW header, read SSE
       const sseResult = await page.evaluate(async (args: {
-        sessionId: string; prompt: string; powResponse: string; thinkingEnabled: boolean; bearerToken: string | null;
+        sessionId: string; prompt: string; powResponse: string; thinkingEnabled: boolean;
+        headers: Record<string, string>;
       }) => {
         try {
           const headers: Record<string, string> = {
+            ...args.headers,
             'Content-Type': 'application/json',
             'x-ds-pow-response': args.powResponse,
           };
-          if (args.bearerToken) headers['Authorization'] = `Bearer ${args.bearerToken}`;
           const res = await fetch('/api/v0/chat/completion', {
             method: 'POST',
             headers,
@@ -247,10 +294,11 @@ export class DeepSeekProvider extends BaseProvider {
         prompt,
         powResponse,
         thinkingEnabled: isThinking,
-        bearerToken: bearer,
+        headers: apiHeaders,
       });
 
       if (sseResult.error) {
+        this.forgetExpiredBearer(sseResult.error);
         yield { type: 'error', message: `DeepSeek API error: ${sseResult.error}` };
         return;
       }

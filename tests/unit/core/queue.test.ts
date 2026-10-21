@@ -59,4 +59,26 @@ describe('ProviderQueue', () => {
     const result = await queue.enqueue('test', async () => 42);
     expect(result).toBe(42);
   });
+
+  it('enforces a minimum gap between starts for the same provider', async () => {
+    const MIN_GAP_MS = 40;
+    const TIMER_SLACK_MS = 10;
+    const queue = new ProviderQueue({ minGapMs: MIN_GAP_MS });
+    const starts: number[] = [];
+    await Promise.all([
+      queue.enqueue('p', async () => { starts.push(Date.now()); }),
+      queue.enqueue('p', async () => { starts.push(Date.now()); }),
+    ]);
+    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(MIN_GAP_MS - TIMER_SLACK_MS);
+  });
+
+  it('caps starts per rolling window', async () => {
+    const WINDOW_MS = 120;
+    const TIMER_SLACK_MS = 20;
+    const queue = new ProviderQueue({ maxPerWindow: 2, windowMs: WINDOW_MS });
+    const starts: number[] = [];
+    const run = () => queue.enqueue('p', async () => { starts.push(Date.now()); });
+    await Promise.all([run(), run(), run()]);
+    expect(starts[2] - starts[0]).toBeGreaterThanOrEqual(WINDOW_MS - TIMER_SLACK_MS);
+  });
 });
