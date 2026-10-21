@@ -46,6 +46,33 @@ describe('BrowserManager launchers', () => {
     expect(chromeLaunch).not.toHaveBeenCalled();
   });
 
+  it('rejects an engine with no launcher configured', async () => {
+    const manager = makeManager(undefined, { engine: 'camoufox' });
+
+    await expect(manager.ensureBrowser()).rejects.toThrow(
+      'No launcher configured for browser engine "camoufox"',
+    );
+  });
+
+  it('activates another engine and releases the previous context', async () => {
+    const chromeContext = { close: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
+    const camoufoxContext = {} as BrowserContext;
+    const camoufoxLaunch = vi.fn().mockResolvedValue(camoufoxContext);
+    const manager = makeManager({
+      chrome: vi.fn().mockResolvedValue(chromeContext),
+      camoufox: camoufoxLaunch,
+    });
+
+    expect(manager.getEngine()).toBe('chrome');
+    await manager.ensureBrowser();
+
+    await manager.activate('camoufox');
+
+    expect(manager.getEngine()).toBe('camoufox');
+    expect(chromeContext.close).toHaveBeenCalled();
+    await expect(manager.ensureBrowser()).resolves.toBe(camoufoxContext);
+  });
+
   it('propagates a launcher failure', async () => {
     const launch = vi.fn().mockRejectedValue(new Error('browser failed to start'));
 

@@ -34,6 +34,8 @@ export interface BrowserManagerOptions {
   launchers?: Partial<Record<BrowserEngine, BrowserLauncher>>;
 }
 
+const CHROME_ARGS = ['--no-first-run', '--no-default-browser-check'];
+
 async function launchChromeContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
   const executablePath = findChromePath();
   if (!executablePath) {
@@ -44,11 +46,15 @@ async function launchChromeContext(options: BrowserLaunchOptions): Promise<Brows
     headless: options.headless,
     executablePath,
     args: options.headless
-      ? ['--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling']
-      : ['--no-first-run', '--no-default-browser-check'],
+      ? [...CHROME_ARGS, '--disable-background-timer-throttling']
+      : CHROME_ARGS,
     timeout: options.timeout,
   });
 }
+
+const defaultLaunchers: Partial<Record<BrowserEngine, BrowserLauncher>> = {
+  chrome: launchChromeContext,
+};
 
 export class BrowserManager {
   private browser: Browser | null = null;
@@ -102,11 +108,7 @@ export class BrowserManager {
     }
 
     // Launch mode — start a new browser with persistent profile
-    this.context = await this.launcher()({
-      profileDir: this.opts.profileDir,
-      headless: true,
-      timeout: this.opts.startupTimeout,
-    });
+    this.context = await this.launch(true);
 
     this._status = 'running';
     this.resetIdleTimer();
@@ -267,11 +269,7 @@ export class BrowserManager {
         this.context = null;
       }
 
-      const headedContext = await this.launcher()({
-        profileDir: this.opts.profileDir,
-        headless: false,
-        timeout: this.opts.startupTimeout,
-      });
+      const headedContext = await this.launch(false);
 
       const page: Page = await headedContext.newPage();
 
@@ -368,20 +366,40 @@ export class BrowserManager {
     return this._mode;
   }
 
+  getEngine(): BrowserEngine {
+    return this._engine;
+  }
+
+  /**
+   * Switch the active engine. Releases the current browser so the next
+   * request launches with the new engine. In attach mode this disconnects
+   * from the user's Chrome without closing it.
+   */
+  async activate(engine: BrowserEngine): Promise<void> {
+    if (engine === this._engine) return;
+    await this.release();
+    this._engine = engine;
+  }
+
   async shutdown(): Promise<void> {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
     }
+    await this.release();
+  }
+
+  private async release(): Promise<void> {
     this.domainPages.clear();
     if (this.browser) {
+      // For a CDP connection this disconnects; the user's Chrome stays open.
       await this.browser.close().catch(() => {});
       this.browser = null;
     }
-    if (this.context) {
+    if (this.context && this._mode !== 'attach') {
       await this.context.close().catch(() => {});
-      this.context = null;
     }
+    this.context = null;
     this._status = 'stopped';
   }
 
@@ -403,7 +421,7 @@ export class BrowserManager {
   }
 
   private getChromeStartCommand(): string {
-    const chromePath = this.findChrome();
+    const chromePath = findChromePath();
     const os = platform();
 
     if (os === 'darwin') {
@@ -427,14 +445,19 @@ export class BrowserManager {
     }
   }
 
-  private launcher(): BrowserLauncher {
-    const launcher = this.opts.launchers?.[this._engine];
-    if (launcher) return launcher;
-    if (this._engine === 'chrome') return launchChromeContext;
-    throw new Error(`No launcher configured for browser engine "${this._engine}".`);
+  private launch(headless: boolean): Promise<BrowserContext> {
+    return this.resolveLauncher()({
+      profileDir: this.opts.profileDir,
+      headless,
+      timeout: this.opts.startupTimeout,
+    });
   }
 
-  private findChrome(): string | undefined {
-    return findChromePath();
+  private resolveLauncher(engine: BrowserEngine = this._engine): BrowserLauncher {
+    const launcher = this.opts.launchers?.[engine] ?? defaultLaunchers[engine];
+    if (!launcher) {
+      throw new Error(`No launcher configured for browser engine "${engine}".`);
+    }
+    return launcher;
   }
 }
