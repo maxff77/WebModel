@@ -71,3 +71,9 @@ Módulos afectados: gestor de navegador, cargador de configuración, CLI, doctor
 - Riesgo a verificar durante implementación: el gestor llama hoy a `browser.close()` al apagar; en modo attach eso puede cerrar el Chrome del usuario. Hay que confirmar empíricamente qué llamada de Playwright desconecta sin cerrar.
 - Riesgo a verificar: el login de Camoufox reutiliza el perfil persistente; confirmar que el `BrowserContext` visible y el headless comparten cookies sin bloqueo de perfil.
 - `camoufox-js` arrastra diez dependencias (better-sqlite3, maxmind, impit, etc.) y su binario pesa ~200 MB.
+
+## Addendum 2026-10-21: perfiles aislados por cuenta
+
+El eje de identidad pasa de "motor" a "perfil". Un perfil empaqueta nombre, motor inmutable, directorio propio y huella persistida; `profiles/<slug>/` es la fuente de verdad y la configuración solo guarda el perfil activo. Un solo perfil activo a la vez. `default` migra desde `chrome-profile`/`camoufox-profile` sin re-login. Login y estado por `perfil:provider`. El failover solo existe si un perfil declara `fallbackProfile`; entonces una caída de arranque o de página cambia a ese perfil, con un único reintento antes de enviar. Regenerar huella es una acción explícita con warning. Attach queda limitado al perfil `default`.
+
+Tickets: #8 (perfiles), #9 (login por perfil), #10 (fallback al arrancar), #11 (página muerta y reintento), #12 (regenerar huella). Sustituyen a #5, #6 y #7.
