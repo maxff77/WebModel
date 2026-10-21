@@ -1,6 +1,7 @@
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { findChromePath } from '../doctor.js';
 import { platform } from 'node:os';
+import { dirname, join } from 'node:path';
 
 export type BrowserStatus = 'running' | 'idle' | 'stopped';
 export type BrowserMode = 'attach' | 'launch';
@@ -22,6 +23,11 @@ export interface BrowserLaunchOptions {
 export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<BrowserContext>;
 
 export type BrowserEngine = 'chrome' | 'camoufox';
+
+/** Camoufox is Firefox: there is no CDP to attach to, so it always launches. */
+export function effectiveMode(engine: BrowserEngine, mode: BrowserMode): BrowserMode {
+  return engine === 'camoufox' ? 'launch' : mode;
+}
 
 export interface BrowserManagerOptions {
   profileDir: string;
@@ -52,8 +58,35 @@ async function launchChromeContext(options: BrowserLaunchOptions): Promise<Brows
   });
 }
 
-const defaultLaunchers: Partial<Record<BrowserEngine, BrowserLauncher>> = {
+async function launchCamoufoxContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
+  let Camoufox: (opts: Record<string, unknown>) => Promise<BrowserContext>;
+  try {
+    // Optional dependency: only users of this engine need it (and Node >= 22).
+    ({ Camoufox } = await import('camoufox-js' as string));
+  } catch (err) {
+    throw new Error(
+      `Camoufox is not installed or could not be loaded: ${(err as Error).message}\n` +
+      'Run: npm install camoufox-js\n' +
+      'Then download the browser binary with: npx camoufox-js fetch',
+    );
+  }
+  try {
+    return await Camoufox({
+      user_data_dir: options.profileDir,
+      headless: options.headless,
+      timeout: options.timeout,
+    });
+  } catch (err) {
+    throw new Error(
+      `Camoufox could not start: ${(err as Error).message}\n\n` +
+      'If the browser binary is missing, download it with: npx camoufox-js fetch',
+    );
+  }
+}
+
+const defaultLaunchers: Record<BrowserEngine, BrowserLauncher> = {
   chrome: launchChromeContext,
+  camoufox: launchCamoufoxContext,
 };
 
 export class BrowserManager {
@@ -61,13 +94,15 @@ export class BrowserManager {
   private context: BrowserContext | null = null;
   private _status: BrowserStatus = 'stopped';
   private _mode: BrowserMode;
+  private _requestedMode: BrowserMode;
   private _engine: BrowserEngine;
   private _loginState: LoginState = { providerId: null, status: 'idle', message: '', startedAt: null };
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private opts: BrowserManagerOptions) {
-    this._mode = opts.mode ?? 'attach';
+    this._requestedMode = opts.mode ?? 'attach';
     this._engine = opts.engine ?? 'chrome';
+    this._mode = effectiveMode(this._engine, this._requestedMode);
   }
 
   /**
@@ -379,6 +414,7 @@ export class BrowserManager {
     if (engine === this._engine) return;
     await this.release();
     this._engine = engine;
+    this._mode = effectiveMode(engine, this._requestedMode);
   }
 
   async shutdown(): Promise<void> {
@@ -445,19 +481,20 @@ export class BrowserManager {
     }
   }
 
+  private profileDirFor(engine: BrowserEngine): string {
+    if (engine === 'chrome') return this.opts.profileDir;
+    return join(dirname(this.opts.profileDir), 'camoufox-profile');
+  }
+
   private launch(headless: boolean): Promise<BrowserContext> {
     return this.resolveLauncher()({
-      profileDir: this.opts.profileDir,
+      profileDir: this.profileDirFor(this._engine),
       headless,
       timeout: this.opts.startupTimeout,
     });
   }
 
   private resolveLauncher(engine: BrowserEngine = this._engine): BrowserLauncher {
-    const launcher = this.opts.launchers?.[engine] ?? defaultLaunchers[engine];
-    if (!launcher) {
-      throw new Error(`No launcher configured for browser engine "${engine}".`);
-    }
-    return launcher;
+    return this.opts.launchers?.[engine] ?? defaultLaunchers[engine];
   }
 }

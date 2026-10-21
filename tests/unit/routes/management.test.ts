@@ -33,5 +33,19 @@ describe('Management endpoints', () => {
       expect(body).toHaveProperty('uptime');
       expect(body).toHaveProperty('providers');
     });
+
+    it('reports the active browser engine', async () => {
+      ctx = createTestContext({ browserEngine: 'camoufox' });
+      const res = await ctx.app.request('/webmodel/health');
+      const body = await res.json();
+      expect(body.browser.engine).toBe('camoufox');
+    });
+
+    it('reports chrome when no engine is wired', async () => {
+      ctx = createTestContext();
+      const res = await ctx.app.request('/webmodel/health');
+      const body = await res.json();
+      expect(body.browser.engine).toBe('chrome');
+    });
   });
 });

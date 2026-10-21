@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
+import type { BrowserEngine } from '../browser/manager.js';
 
 export interface BridgeConfig {
   server: {
@@ -10,6 +11,8 @@ export interface BridgeConfig {
     openDashboard: boolean;
   };
   browser: {
+    /** Browser engine. Default 'chrome'; Camoufox needs its binary (npx camoufox-js fetch). */
+    engine: BrowserEngine;
     profileDir: string;
     startupTimeout: number;
     idleShutdown: number;
@@ -41,6 +44,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       openDashboard: true,
     },
     browser: {
+      engine: 'chrome',
       profileDir: join(stateDir, 'chrome-profile'),
       startupTimeout: 30000,
       idleShutdown: 300,
@@ -73,7 +77,12 @@ interface LoadOptions {
   port?: number;
   host?: string;
   authToken?: string;
+  engine?: string;
   verbose?: boolean;
+}
+
+function asEngine(value: string | undefined): BrowserEngine | undefined {
+  return value === 'chrome' || value === 'camoufox' ? value : undefined;
 }
 
 export function loadConfig(opts: LoadOptions): BridgeConfig {
@@ -98,10 +107,15 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
     config.logging.file = join(opts.stateDir, 'logs', 'bridge.log');
   }
 
+  // An invalid engine in YAML falls back to chrome. A bad CLI/env override is ignored.
+  config.browser.engine = asEngine(config.browser.engine) ?? 'chrome';
+
   // CLI overrides
   if (opts.port !== undefined) config.server.port = opts.port;
   if (opts.host !== undefined) config.server.host = opts.host;
   if (opts.authToken !== undefined) config.server.authToken = opts.authToken;
+  const cliEngine = asEngine(opts.engine);
+  if (cliEngine) config.browser.engine = cliEngine;
   if (opts.verbose) config.logging.level = 'debug';
 
   // Environment variable overrides (Docker-friendly)
@@ -110,6 +124,8 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   if (process.env.WMB_AUTH_TOKEN) config.server.authToken = process.env.WMB_AUTH_TOKEN;
   if (process.env.WMB_LOG_LEVEL) config.logging.level = process.env.WMB_LOG_LEVEL as any;
   if (process.env.WMB_FALLBACK_MODEL) config.providers.fallbackModel = process.env.WMB_FALLBACK_MODEL;
+  const envEngine = asEngine(process.env.WMB_BROWSER_ENGINE);
+  if (envEngine) config.browser.engine = envEngine;
   if (process.env.WMB_STATE_DIR) {
     config.browser.profileDir = join(process.env.WMB_STATE_DIR, 'chrome-profile');
     config.logging.file = join(process.env.WMB_STATE_DIR, 'logs', 'bridge.log');

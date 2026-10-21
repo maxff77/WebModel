@@ -76,6 +76,38 @@ server:
     expect(config.logging.file).toBe('/custom/dir/logs/bridge.log');
   });
 
+  it('defaults to the chrome engine', () => {
+    const config = loadConfig({ stateDir: testDir });
+    expect(config.browser.engine).toBe('chrome');
+  });
+
+  it('reads the browser engine from YAML', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'browser:\n  engine: camoufox\n');
+    const config = loadConfig({ stateDir: testDir });
+    expect(config.browser.engine).toBe('camoufox');
+  });
+
+  it('--engine overrides YAML', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'browser:\n  engine: camoufox\n');
+    const config = loadConfig({ stateDir: testDir, engine: 'chrome' });
+    expect(config.browser.engine).toBe('chrome');
+  });
+
+  it('WMB_BROWSER_ENGINE overrides --engine', () => {
+    process.env.WMB_BROWSER_ENGINE = 'camoufox';
+    try {
+      const config = loadConfig({ stateDir: testDir, engine: 'chrome' });
+      expect(config.browser.engine).toBe('camoufox');
+    } finally {
+      delete process.env.WMB_BROWSER_ENGINE;
+    }
+  });
+
+  it('ignores an unknown engine value', () => {
+    const config = loadConfig({ stateDir: testDir, engine: 'firefox' });
+    expect(config.browser.engine).toBe('chrome');
+  });
+
   it('providers.enabled defaults to all providers', () => {
     const config = loadConfig({ stateDir: testDir });
     expect(config.providers.enabled).toContain('claude-web');

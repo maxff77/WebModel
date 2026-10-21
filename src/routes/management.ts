@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { ProviderRegistry } from '../core/registry.js';
 import { AuthStore } from '../auth/store.js';
-import type { BrowserStatus, LoginState } from '../browser/manager.js';
+import type { BrowserEngine, BrowserStatus, LoginState } from '../browser/manager.js';
 import type { MetricsCollector } from '../core/metrics.js';
 
 export interface ManagementDeps {
@@ -10,6 +10,7 @@ export interface ManagementDeps {
   onLogin?: (providerId: string) => Promise<{ status: string; message: string }>;
   getLoginState?: () => LoginState;
   getBrowserStatus?: () => BrowserStatus;
+  getBrowserEngine?: () => BrowserEngine;
   startTime?: number;
   metrics?: MetricsCollector;
 }
@@ -91,7 +92,10 @@ export function managementRoutes(deps: ManagementDeps): Hono {
     return c.json({
       status: 'healthy',
       uptime: Math.floor((Date.now() - routeStartTime) / 1000),
-      browser: { status: browserStatus },
+      browser: {
+        status: browserStatus,
+        engine: deps.getBrowserEngine?.() ?? 'chrome',
+      },
       providers: Object.fromEntries(
         statuses.map(s => [s.id, { authenticated: s.authenticated, models: s.modelCount }])
       ),

@@ -6,7 +6,7 @@ import { createApp } from './server.js';
 import { loadConfig } from './config/loader.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
-import { BrowserManager } from './browser/manager.js';
+import { BrowserManager, effectiveMode } from './browser/manager.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
@@ -146,6 +146,7 @@ program
   .option('--config <file>', 'config file path')
   .option('-v, --verbose', 'verbose logging')
   .option('--browser-mode <mode>', 'browser mode: attach (default) or launch', 'attach')
+  .option('--engine <engine>', 'browser engine: chrome (default) or camoufox')
   .option('--cdp-url <url>', 'Chrome CDP URL for attach mode', 'http://127.0.0.1:9222')
   .option('--chrome-profile <dir>', 'Chrome user data directory (e.g. ~/.openclaw/browser/openclaw/user-data)')
   .action(async (opts) => {
@@ -172,6 +173,7 @@ program
       port: opts.port,
       host: opts.host,
       authToken: opts.authToken,
+      engine: opts.engine,
       verbose: opts.verbose,
     });
 
@@ -185,7 +187,12 @@ program
     }
 
     // ── Step 3: Browser setup ──
-    const browserMode = (opts.browserMode === 'launch' ? 'launch' : 'attach') as 'attach' | 'launch';
+    const engine = config.browser.engine;
+    const requestedMode = (opts.browserMode === 'launch' ? 'launch' : 'attach') as 'attach' | 'launch';
+    const browserMode = effectiveMode(engine, requestedMode);
+    if (browserMode !== requestedMode) {
+      console.log(chalk.yellow('  ⚠ Camoufox does not support attach mode; starting in launch mode.'));
+    }
     const cdpPort = parseInt(new URL(opts.cdpUrl).port, 10) || 9222;
     const cdpUrl = opts.cdpUrl;
     // Chrome profile: custom > config > default
@@ -233,7 +240,7 @@ program
         }
       }
     } else {
-      console.log(chalk.green('  ✓') + ' Browser mode: launch (independent Chrome)');
+      console.log(chalk.green('  ✓') + ` Browser mode: launch (${engine})`);
     }
 
     const browserManager = new BrowserManager({
@@ -243,6 +250,7 @@ program
       loginTimeout: config.browser.loginTimeout,
       cdpUrl,
       mode: browserMode,
+      engine,
     });
 
     // ── Step 4: Register providers ──
@@ -296,6 +304,7 @@ program
       authStore,
       authToken: config.server.authToken,
       getBrowserStatus: () => browserManager.getStatus(),
+      getBrowserEngine: () => browserManager.getEngine(),
       onLogin: async (providerId: string) => {
         const provider = registry.getProvider(providerId);
         if (!provider) return { status: 'error', message: `Provider "${providerId}" not found.` };
@@ -313,7 +322,7 @@ program
           status: 'login_started',
           message: browserMode === 'attach'
             ? 'A new tab opened in your Chrome. Log in and close the tab when done.'
-            : 'A Chrome window opened. Log in and close it when done.',
+            : `A ${engine === 'camoufox' ? 'Camoufox' : 'Chrome'} window opened. Log in and close it when done.`,
         };
       },
       getLoginState: () => browserManager.getLoginState(),
