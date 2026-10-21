@@ -139,6 +139,9 @@ export class BrowserManager {
   private _profile: ResolvedProfile;
   private _loginState: LoginState = { providerId: null, status: 'idle', message: '', startedAt: null };
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A page closed or crashed; the next acquisition must not reuse this browser. */
+  private _dead = false;
+  private releasing = false;
 
   constructor(private opts: BrowserManagerOptions) {
     this._profile = opts.profile;
@@ -151,6 +154,14 @@ export class BrowserManager {
    * In launch mode, launches a new persistent context.
    */
   async ensureBrowser(): Promise<BrowserContext> {
+    if (this._dead) {
+      // A closed or crashed page marks the profile down: the next acquisition
+      // moves to its declared fallback, or relaunches the same profile.
+      this._dead = false;
+      await this.release();
+      await this.switchToFallback('page closed or crashed');
+    }
+
     if (this.context) {
       this.resetIdleTimer();
       return this.context;
@@ -198,25 +209,35 @@ export class BrowserManager {
    */
   private async launchFallback(cause: Error): Promise<BrowserContext> {
     const failed = this._profile;
+    await this.switchToFallback(`failed to start (${cause.message})`);
+    if (this._profile === failed) throw cause;
+    await this.release();
+    return this.launch(true);
+  }
+
+  /**
+   * Move to the profile's declared fallback. A fallback with no session cannot
+   * serve, so fail naming it. Without a fallback the current profile is kept.
+   */
+  private async switchToFallback(reason: string): Promise<void> {
+    const failed = this._profile;
     const fallbackName = failed.fallbackProfile;
     const fallback = fallbackName && fallbackName !== failed.name
       ? this.opts.resolveProfile?.(fallbackName)
       : undefined;
-    if (!fallback) throw cause;
+    if (!fallback) return;
 
     if (this.opts.hasSession && !this.opts.hasSession(fallback.name)) {
       throw new BrowserUnavailableError(
-        `Profile "${failed.name}" failed to start (${cause.message}). ` +
+        `Profile "${failed.name}" ${reason}. ` +
         `Fallback profile "${fallback.name}" has no login: open the Dashboard and login as "${fallback.name}".`,
       );
     }
 
-    await this.release();
     this._profile = fallback;
     // Failover always launches the fallback: it is another identity, never the
     // user's own Chrome, so attach semantics do not apply.
     this._mode = 'launch';
-    return this.launch(true);
   }
 
   // Cache: domain → page (avoid re-navigating for same domain)
@@ -236,6 +257,13 @@ export class BrowserManager {
 
     if (!page) {
       page = await ctx.newPage();
+      const dead = () => {
+        if (this.releasing) return;
+        this._dead = true;
+        this._status = 'stopped';
+      };
+      page.on('close', dead);
+      page.on('crash', dead);
       try {
         await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch {
@@ -371,10 +399,9 @@ export class BrowserManager {
     this._loginState = { providerId, status: 'opening', message: 'Launching Chrome...', startedAt: Date.now() };
 
     try {
-      if (this.context) {
-        await this.context.close().catch(() => {});
-        this.context = null;
-      }
+      // Intentional close, not a dead page: release() suppresses the close
+      // event so login does not mark the profile down.
+      await this.release();
 
       loginProfile = this._profile.name;
       const headedContext = await this.launch(false);
@@ -507,17 +534,24 @@ export class BrowserManager {
   }
 
   private async release(): Promise<void> {
-    this.domainPages.clear();
-    if (this.browser) {
-      // For a CDP connection this disconnects; the user's Chrome stays open.
-      await this.browser.close().catch(() => {});
-      this.browser = null;
+    // Closing pages fires their own 'close' events; those must not mark the
+    // profile down, since the next acquisition is already rebuilding it.
+    this.releasing = true;
+    try {
+      this.domainPages.clear();
+      if (this.browser) {
+        // For a CDP connection this disconnects; the user's Chrome stays open.
+        await this.browser.close().catch(() => {});
+        this.browser = null;
+      }
+      if (this.context && this._mode !== 'attach') {
+        await this.context.close().catch(() => {});
+      }
+      this.context = null;
+      this._status = 'stopped';
+    } finally {
+      this.releasing = false;
     }
-    if (this.context && this._mode !== 'attach') {
-      await this.context.close().catch(() => {});
-    }
-    this.context = null;
-    this._status = 'stopped';
   }
 
   getStatus(): BrowserStatus {

@@ -110,6 +110,26 @@ describe('DeepSeekProvider.chat SSE handling', () => {
   });
 });
 
+describe('DeepSeekProvider send boundary', () => {
+  it('marks a failure after the completion request as sent, so the route will not retry it', async () => {
+    const provider = providerWithReplies([
+      { data: createReply },
+      powReply,
+      { error: 'HTTP 500: upstream died' },
+    ]);
+    expect(await events(provider)).toEqual([
+      { type: 'error', message: 'DeepSeek API error: HTTP 500: upstream died', sent: true },
+    ]);
+  });
+
+  it('leaves a failure before the completion request unmarked, so it can be retried', async () => {
+    const provider = providerWithReplies([{ error: 'HTTP 500: no session' }]);
+    expect(await events(provider)).toEqual([
+      { type: 'error', message: 'DeepSeek session create failed: HTTP 500: no session' },
+    ]);
+  });
+});
+
 describe('DeepSeekProvider session create', () => {
   it('reads the id from data.biz_data.chat_session', async () => {
     const provider = providerWithReplies([

@@ -79,19 +79,20 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       let thinking = '';
       let error: string | null = null;
       let code: string | undefined;
+      let sent = false;
       let stopReason = 'end_turn';
-      if (signal.aborted) return { text, thinking, error: 'client disconnected', code: 'aborted', stopReason };
+      if (signal.aborted) return { text, thinking, error: 'client disconnected', code: 'aborted', stopReason, sent };
       try {
         for await (const event of provider.chat({ model, messages, tools, thinking: wantThinking, stream: body.stream === true, signal })) {
           if (event.type === 'text_delta') text += event.delta;
           else if (event.type === 'thinking_delta') thinking += event.delta;
-          else if (event.type === 'error') { error = event.message; code = event.code; }
+          else if (event.type === 'error') { error = event.message; code = event.code; sent = event.sent === true; }
           else if (event.type === 'done') stopReason = streamEventToStopReason(event) ?? 'end_turn';
         }
       } catch (err) {
         error = (err as Error).message;
       }
-      return { text, thinking, error, code, stopReason };
+      return { text, thinking, error, code, stopReason, sent };
     }
 
     const failed = (r: Awaited<ReturnType<typeof attempt>>) => r.error && !r.text && !r.thinking;
@@ -112,10 +113,11 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
 
     // Web providers drive one shared browser tab, so requests run one at a time;
     // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
+    // A failure after the message was sent is not retried: that would post it twice.
     const run = () => queue.enqueue(provider.info.id, paced, signal);
     let reply = await run();
     if (signal.aborted) return disconnected();
-    if (failed(reply) && reply.code !== 'upstream_rate_limit') reply = await run();
+    if (failed(reply) && !reply.sent && reply.code !== 'upstream_rate_limit') reply = await run();
     if (signal.aborted) return disconnected();
 
     // Nothing usable: answer like the real API does, so Claude Code retries

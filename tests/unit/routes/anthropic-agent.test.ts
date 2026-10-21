@@ -197,6 +197,21 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(body.content[0].text).toBe('recovered');
   });
 
+  it('does not retry an error once the message has been sent', async () => {
+    let calls = 0;
+    const sentFailure = new CapturingProvider('');
+    sentFailure.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek API error: upstream died', sent: true };
+    };
+    const res = await post(sentFailure, false);
+    expect(calls).toBe(1);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({
+      type: 'error', error: { type: 'api_error', message: 'DeepSeek API error: upstream died' },
+    });
+  });
+
   it('persistent provider error is an API error Claude Code can retry, not assistant text', async () => {
     const broken = new CapturingProvider('');
     broken.chat = async function* () { yield { type: 'error', message: 'boom' }; };

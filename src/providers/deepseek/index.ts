@@ -107,6 +107,10 @@ export class DeepSeekProvider extends BaseProvider {
       return;
     }
 
+    // From the completion POST on, DeepSeek may have the prompt: failures are
+    // reported as sent so the route does not post it a second time.
+    let sent = false;
+
     try {
       const page = await this.getPage(DEEPSEEK_WEB_BASE_URL);
       let clientHeaders = this.clientHeaders;
@@ -245,6 +249,7 @@ export class DeepSeekProvider extends BaseProvider {
       const isThinking = req.thinking || req.model.includes('reasoner');
 
       // Step 6: Send message with PoW header, read SSE
+      sent = true;
       const sseResult = await page.evaluate(async (args: {
         sessionId: string; prompt: string; powResponse: string; thinkingEnabled: boolean;
         headers: Record<string, string>;
@@ -299,7 +304,7 @@ export class DeepSeekProvider extends BaseProvider {
 
       if (sseResult.error) {
         this.forgetExpiredBearer(sseResult.error);
-        yield { type: 'error', message: `DeepSeek API error: ${sseResult.error}` };
+        yield { type: 'error', message: `DeepSeek API error: ${sseResult.error}`, sent };
         return;
       }
 
@@ -401,7 +406,7 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
     } catch (err) {
-      yield { type: 'error', message: `DeepSeek provider error: ${(err as Error).message}` };
+      yield { type: 'error', message: `DeepSeek provider error: ${(err as Error).message}`, sent };
     }
   }
 }

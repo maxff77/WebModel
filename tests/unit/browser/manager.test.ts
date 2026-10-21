@@ -27,11 +27,26 @@ function makeManager(
   });
 }
 
-function fakeContext() {
+function fakeContext(page?: ReturnType<typeof fakePage>) {
   return {
     close: vi.fn().mockResolvedValue(undefined),
-    newPage: vi.fn(),
-  } as unknown as BrowserContext & { close: ReturnType<typeof vi.fn> };
+    newPage: vi.fn().mockResolvedValue(page),
+  } as unknown as BrowserContext & {
+    close: ReturnType<typeof vi.fn>;
+    newPage: ReturnType<typeof vi.fn>;
+  };
+}
+
+/** Page double that records the events the manager subscribes to. */
+function fakePage() {
+  const handlers = new Map<string, () => void>();
+  return {
+    isClosed: vi.fn(() => false),
+    goto: vi.fn().mockResolvedValue(undefined),
+    evaluate: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn((event: string, cb: () => void) => { handlers.set(event, cb); }),
+    emit: (event: 'close' | 'crash') => handlers.get(event)?.(),
+  };
 }
 
 describe('BrowserManager profiles', () => {
@@ -262,6 +277,66 @@ describe('BrowserManager profile fallback', () => {
 
     await expect(manager.ensureBrowser()).rejects.toThrow('personal failed');
     expect(launch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['close', 'crash'] as const)(
+    'a page that %ss marks the profile down and the next acquisition uses the fallback',
+    async (event) => {
+      const dead = fakePage();
+      const live = fakePage();
+      const workContext = fakeContext(dead);
+      const personalContext = fakeContext(live);
+      const camoufoxLaunch = vi.fn().mockResolvedValue(personalContext);
+      const manager = makeManager(
+        { chrome: vi.fn().mockResolvedValue(workContext), camoufox: camoufoxLaunch },
+        { profile: work, resolveProfile: () => personal, hasSession: () => true },
+      );
+
+      await expect(manager.getPageForOrigin('https://chat.deepseek.com')).resolves.toBe(dead);
+      dead.emit(event);
+      expect(manager.getStatus()).toBe('stopped');
+
+      await expect(manager.getPageForOrigin('https://chat.deepseek.com')).resolves.toBe(live);
+      expect(manager.getProfile().name).toBe('personal');
+      expect(camoufoxLaunch).toHaveBeenCalledWith(
+        expect.objectContaining({ profileDir: '/tmp/p/personal/data' }),
+      );
+      expect(workContext.close).toHaveBeenCalled();
+    },
+  );
+
+  it('relaunches the same profile when a page dies and no fallback is declared', async () => {
+    const first = fakePage();
+    const second = fakePage();
+    const launch = vi.fn()
+      .mockResolvedValueOnce(fakeContext(first))
+      .mockResolvedValueOnce(fakeContext(second));
+    const manager = makeManager(
+      { chrome: launch },
+      { profile: { name: 'work', engine: 'chrome', dir: '/tmp/p/work/data' } },
+    );
+
+    await manager.getPageForOrigin('https://chat.deepseek.com');
+    first.emit('close');
+
+    await expect(manager.getPageForOrigin('https://chat.deepseek.com')).resolves.toBe(second);
+    expect(manager.getProfile().name).toBe('work');
+    expect(launch).toHaveBeenCalledTimes(2);
+  });
+
+  it('names the fallback profile and asks for login when a page dies and it has no session', async () => {
+    const dead = fakePage();
+    const manager = makeManager(
+      { chrome: vi.fn().mockResolvedValue(fakeContext(dead)), camoufox: vi.fn() },
+      { profile: work, resolveProfile: () => personal, hasSession: () => false },
+    );
+
+    await manager.getPageForOrigin('https://chat.deepseek.com');
+    dead.emit('close');
+
+    await expect(manager.getPageForOrigin('https://chat.deepseek.com')).rejects.toThrow(
+      /profile "personal".*login/i,
+    );
   });
 });
 
