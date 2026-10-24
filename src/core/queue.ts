@@ -5,6 +5,9 @@ export interface QueueOptions {
   maxPerWindow?: number;
   /** Rolling window for maxPerWindow. */
   windowMs?: number;
+  /** A second, longer budget: DeepSeek locks out on volume over ~20-30 min. */
+  maxPerLongWindow?: number;
+  longWindowMs?: number;
 }
 
 function envNumber(raw: string | undefined, fallback: number, min: number): number {
@@ -22,6 +25,9 @@ function envNumber(raw: string | undefined, fallback: number, min: number): numb
 export const requestPacing: QueueOptions = {
   minGapMs: envNumber(process.env.WMB_MIN_GAP_MS, 6_000, 0),
   maxPerWindow: envNumber(process.env.WMB_MAX_RPM, 10, 1),
+  // 2026-10-24: refused at 139 calls in 30 min, let through again at 79.
+  maxPerLongWindow: envNumber(process.env.WMB_MAX_PER_30MIN, 60, 1),
+  longWindowMs: 30 * 60_000,
 };
 
 export class ProviderQueue {
@@ -47,16 +53,21 @@ export class ProviderQueue {
   }
 
   private async waitForSlot(providerId: string, signal?: AbortSignal): Promise<void> {
-    const { minGapMs = 0, maxPerWindow, windowMs = 60_000 } = this.options;
+    const { minGapMs = 0, maxPerWindow, windowMs = 60_000, maxPerLongWindow, longWindowMs = 0 } = this.options;
     const now = Date.now();
-    const recent = (this.starts.get(providerId) ?? []).filter(t => t > now - windowMs);
+    const recent = (this.starts.get(providerId) ?? []).filter(t => t > now - Math.max(windowMs, longWindowMs));
 
     let wait = 0;
     const last = recent.at(-1);
     if (last !== undefined) wait = Math.max(wait, last + minGapMs - now);
-    if (maxPerWindow !== undefined && recent.length >= maxPerWindow) {
+    for (const [max, ms] of [[maxPerWindow, windowMs], [maxPerLongWindow, longWindowMs]] as const) {
+      const inWindow = recent.filter(t => t > now - ms);
       // Wait until the oldest call still inside the window leaves it.
-      wait = Math.max(wait, recent[recent.length - maxPerWindow] + windowMs - now);
+      if (max !== undefined && inWindow.length >= max) wait = Math.max(wait, inWindow[inWindow.length - max] + ms - now);
+    }
+    // Only the long window waits past a minute; say so, or a stalled session looks hung.
+    if (maxPerLongWindow !== undefined && wait > 60_000) {
+      console.warn(`[queue] ${new Date().toISOString()} ${providerId} at its ${longWindowMs / 60_000}-min budget, waiting ${Math.round(wait / 1000)}s`);
     }
 
     if (wait > 0) await this.sleep(wait, signal);

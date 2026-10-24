@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DeepSeekProvider } from '../../../src/providers/deepseek/index.js';
 import { DEEPSEEK_DEVICE_ID_KEY } from '../../../src/providers/deepseek/client.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
@@ -69,6 +69,16 @@ describe('DeepSeekProvider.chat SSE handling', () => {
     const sse = 'event: hint\ndata: {"type":"error","content":"Blocked by policy.","finish_reason":"content_filter"}\n\n';
     expect(await events(providerWithSse(sse))).toEqual([
       { type: 'error', message: 'DeepSeek: Blocked by policy.', code: 'content_filter', possiblySent: true },
+    ]);
+  });
+
+  // 2026-10-24, suspended account: the completion answered 200 and the bridge replied
+  // empty, which Claude Code takes as a finished turn. The real body was not captured;
+  // this envelope shape is a guess, the test only needs "not SSE".
+  it('a completion body that is not SSE is an error with the body, not an empty reply', async () => {
+    const body = '{"code":40301,"msg":"ACCOUNT_SUSPENDED","data":null}';
+    expect(await events(providerWithSse(body))).toEqual([
+      { type: 'error', message: expect.stringContaining('ACCOUNT_SUSPENDED'), possiblySent: true },
     ]);
   });
 
@@ -186,5 +196,30 @@ describe('DeepSeekProvider session create', () => {
       { type: 'done', reason: 'stop' },
     ]);
     expect(reloads()).toBe(2);
+  });
+});
+
+describe('DeepSeekProvider closed session', () => {
+  // 2026-10-24: after a lockout the page sat on /sign_in with userToken.value null;
+  // the only symptom was "could not extract bearer token" while the dashboard said logged in.
+  it('a page on /sign_in marks DeepSeek logged out and reports auth_expired', async () => {
+    const setStatus = vi.fn();
+    const page = {
+      on: () => {}, off: () => {}, reload: async () => {},
+      url: () => 'https://chat.deepseek.com/sign_in',
+      evaluate: async () => 'test-device',
+    };
+    const provider = new DeepSeekProvider({ setStatus } as any, undefined, async () => page as any);
+    vi.useFakeTimers();
+    try {
+      const pending = events(provider);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await pending).toEqual([
+        { type: 'error', message: expect.stringContaining('/sign_in'), code: 'auth_expired' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(setStatus).toHaveBeenCalledWith('deepseek-web', 'expired');
   });
 });

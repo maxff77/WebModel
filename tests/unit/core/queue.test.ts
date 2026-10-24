@@ -81,4 +81,14 @@ describe('ProviderQueue', () => {
     await Promise.all([run(), run(), run()]);
     expect(starts[2] - starts[0]).toBeGreaterThanOrEqual(WINDOW_MS - TIMER_SLACK_MS);
   });
+
+  it('caps starts per long window too, independent of the per-minute cap', async () => {
+    const LONG_MS = 120;
+    const TIMER_SLACK_MS = 20;
+    const queue = new ProviderQueue({ maxPerWindow: 10, maxPerLongWindow: 2, longWindowMs: LONG_MS });
+    const starts: number[] = [];
+    const run = () => queue.enqueue('p', async () => { starts.push(Date.now()); });
+    await Promise.all([run(), run(), run()]);
+    expect(starts[2] - starts[0]).toBeGreaterThanOrEqual(LONG_MS - TIMER_SLACK_MS);
+  });
 });

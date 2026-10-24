@@ -166,6 +166,14 @@ export class DeepSeekProvider extends BaseProvider {
         }
       }
       if (!bearer) {
+        // DeepSeek's frontend drops a closed session to /sign_in (userToken.value null).
+        // On 2026-10-24 that came between a lockout and a suspension: log it with a time.
+        if (new URL(page.url()).pathname.startsWith('/sign_in')) {
+          console.warn(`[${this.info.id}] ${new Date().toISOString()} session closed: page is on /sign_in, marked logged out`);
+          this.authStore.setStatus(this.info.id, 'expired');
+          yield { type: 'error', message: 'DeepSeek: session closed (page is on /sign_in). Log in again from the dashboard.', code: 'auth_expired' };
+          return;
+        }
         yield { type: 'error', message: 'DeepSeek: could not extract bearer token. Please re-login at chat.deepseek.com' };
         return;
       }
@@ -336,6 +344,17 @@ export class DeepSeekProvider extends BaseProvider {
         emitted[index] = prev + content;
         return content.length > 0 ? fragmentDelta(type, content) : null;
       };
+      // A 200 body that is not SSE parsed to an empty reply, which Claude Code takes as a
+      // finished turn (seen on a suspended account, 2026-10-24). Surface and log the body.
+      // ponytail: SSE carrying only unknown events still parses to empty; add a check when seen.
+      if (!/^\s*data:/m.test(sseResult.data ?? '')) {
+        const body = (sseResult.data ?? '').trim().slice(0, 200) || '(empty body)';
+        console.warn(`[${this.info.id}] ${new Date().toISOString()} completion was not a stream: ${body}`);
+        this.forgetExpiredBearer(body);
+        yield { type: 'error', message: `DeepSeek: completion was not a stream: ${body}`, possiblySent };
+        return;
+      }
+
       const lines = (sseResult.data ?? '').split('\n');
       let lastPath = '';
       let sawSnapshot = false;

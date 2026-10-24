@@ -236,6 +236,19 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(calls).toBe(2);
   });
 
+  it('a closed provider session is a 401 asked once, not a "temporary" 502 retried', async () => {
+    let calls = 0;
+    const closed = new CapturingProvider('');
+    closed.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek: session closed (page is on /sign_in).', code: 'auth_expired' };
+    };
+    const res = await post(closed, true);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ error: { type: 'authentication_error', code: 'auth_expired' } });
+    expect(calls).toBe(1);
+  });
+
   // The client may give up (Claude Code timeout, user cancel) while its turn waits
   // in the lane. Abandoned work must not reach the shared browser tab.
   it('client already gone: the provider is never asked', async () => {

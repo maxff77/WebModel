@@ -18,7 +18,7 @@ import {
 import { dsmlShape, parseToolCalls, renderToolCalls } from '../core/tool-protocol.js';
 import { ProviderQueue, requestPacing } from '../core/queue.js';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
+import { AuthExpiredError, AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import { buildWebPrompt, estimateTokens, type Message, type ToolDef } from '../core/provider.js';
 
 /**
@@ -150,12 +150,17 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     const run = () => queue.enqueue(provider.info.id, paced, signal);
     let reply = await run();
     if (signal.aborted) return disconnected();
-    if (failed(reply) && !reply.possiblySent && reply.code !== 'upstream_rate_limit') reply = await run();
+    if (failed(reply) && !reply.possiblySent && reply.code !== 'upstream_rate_limit' && reply.code !== 'auth_expired') reply = await run();
     if (signal.aborted) return disconnected();
 
     // Nothing usable: answer like the real API does, so Claude Code retries
     // instead of treating the error as the assistant's message.
     if (failed(reply)) {
+      // A closed session needs a login, not a retry: Claude Code calls a 502 "temporary".
+      if (reply.code === 'auth_expired') {
+        const res = errorToHttpResponse(new AuthExpiredError(provider.info.id));
+        return c.json(res.body, res.status as any);
+      }
       const limited = reply.code === 'upstream_rate_limit';
       return c.json(
         { type: 'error', error: { type: limited ? 'rate_limit_error' : 'api_error', message: reply.error } },

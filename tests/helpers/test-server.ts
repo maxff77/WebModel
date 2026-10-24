@@ -28,6 +28,7 @@ export function createTestContext(opts?: {
   // Route tests exercise behaviour, not real pacing; the 1s gap would only slow them.
   requestPacing.minGapMs = 0;
   requestPacing.maxPerWindow = undefined;
+  requestPacing.maxPerLongWindow = undefined;
 
   const stateDir = join(tmpdir(), `wmb-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(stateDir, { recursive: true });
