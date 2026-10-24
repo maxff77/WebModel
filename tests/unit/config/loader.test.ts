@@ -89,6 +89,19 @@ server:
     expect(config.browser.profile).toBe('personal');
   });
 
+  it('browser.headless defaults to true; YAML or WMB_HEADLESS=false shows the window', () => {
+    expect(loadConfig({ stateDir: testDir }).browser.headless).toBe(true);
+    writeFileSync(join(testDir, 'config.yml'), 'browser:\n  headless: false\n');
+    expect(loadConfig({ stateDir: testDir }).browser.headless).toBe(false);
+    writeFileSync(join(testDir, 'config.yml'), '');
+    process.env.WMB_HEADLESS = 'false';
+    try {
+      expect(loadConfig({ stateDir: testDir }).browser.headless).toBe(false);
+    } finally {
+      delete process.env.WMB_HEADLESS;
+    }
+  });
+
   it('WMB_PROFILE overrides --profile', () => {
     process.env.WMB_PROFILE = 'env-profile';
     try {

@@ -20,6 +20,8 @@ export interface BridgeConfig {
     startupTimeout: number;
     idleShutdown: number;
     loginTimeout: number;
+    /** Launch mode only: false shows the browser window while it serves requests. */
+    headless: boolean;
     mode: 'attach' | 'launch';
     cdpUrl: string;
   };
@@ -53,6 +55,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       startupTimeout: 30000,
       idleShutdown: 300,
       loginTimeout: 120,
+      headless: true,
       mode: 'attach',
       cdpUrl: 'http://127.0.0.1:9222',
     },
@@ -133,6 +136,7 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   const envEngine = asEngine(process.env.WMB_BROWSER_ENGINE);
   if (envEngine) config.browser.engine = envEngine;
   if (process.env.WMB_PROFILE) config.browser.profile = process.env.WMB_PROFILE;
+  if (process.env.WMB_HEADLESS) config.browser.headless = !/^(false|0)$/i.test(process.env.WMB_HEADLESS);
   if (process.env.WMB_STATE_DIR) {
     config.browser.profileDir = join(process.env.WMB_STATE_DIR, 'chrome-profile');
     config.logging.file = join(process.env.WMB_STATE_DIR, 'logs', 'bridge.log');

@@ -65,6 +65,7 @@ export interface BrowserManagerOptions {
   startupTimeout: number;
   idleShutdown: number;
   loginTimeout: number;
+  headless?: boolean;     // launch mode; default true
   cdpUrl?: string;        // e.g. "http://127.0.0.1:9222"
   mode?: BrowserMode;     // "attach" (default) | "launch"
   launchers?: Partial<Record<BrowserEngine, BrowserLauncher>>;
@@ -193,7 +194,7 @@ export class BrowserManager {
 
     // Launch mode — start a new browser with persistent profile
     try {
-      this.context = await this.launch(true);
+      this.context = await this.launch(this.opts.headless ?? true);
     } catch (err) {
       this.context = await this.launchFallback(err as Error);
     }
@@ -210,7 +211,7 @@ export class BrowserManager {
   private async launchFallback(cause: Error): Promise<BrowserContext> {
     const summary = `Profile "${this._profile.name}" failed to start (${cause.message})`;
     if (!(await this.failOver(summary))) throw cause;
-    return this.launch(true);
+    return this.launch(this.opts.headless ?? true);
   }
 
   /**

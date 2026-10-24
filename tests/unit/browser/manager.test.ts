@@ -64,6 +64,12 @@ describe('BrowserManager profiles', () => {
     expect(manager.getEngine()).toBe('chrome');
   });
 
+  it('launch mode runs headed when headless is off, so the user can watch the page', async () => {
+    const launch = vi.fn().mockResolvedValue({} as BrowserContext);
+    await makeManager({ chrome: launch }, { headless: false }).ensureBrowser();
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ headless: false }));
+  });
+
   it('uses the launcher of the profile engine', async () => {
     const chromeLaunch = vi.fn();
     const camoufoxLaunch = vi.fn().mockResolvedValue({} as BrowserContext);

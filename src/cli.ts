@@ -269,6 +269,7 @@ program
       startupTimeout: config.browser.startupTimeout,
       idleShutdown: config.browser.idleShutdown,
       loginTimeout: config.browser.loginTimeout,
+      headless: config.browser.headless,
       cdpUrl,
       mode: browserMode,
       // A failed launch moves to the profile's declared fallback, if any.
