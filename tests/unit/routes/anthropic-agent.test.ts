@@ -301,6 +301,29 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(starts[2] - starts[1]).toBeGreaterThanOrEqual(55);
   });
 
+  // 2026-10-24: Claude Code re-sent each 429 at once and every request restarted the
+  // cooldown at 5 s, so a ~10 min lockout took 20 probes.
+  it('the cooldown carries over to the next request instead of probing again at once', async () => {
+    Object.assign(rateLimitCooldown, { firstWaitMs: 20, maxWaitMs: 100 });
+    const starts: number[] = [];
+    const limited = new CapturingProvider('');
+    limited.chat = async function* () {
+      starts.push(performance.now());
+      yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
+    };
+    ctx = createTestContext({ providers: [limited as any] });
+    const req = () => ctx.app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(claudeCodeBody(false)),
+    });
+    expect((await req()).status).toBe(429);
+    const probes = starts.length;
+    expect((await req()).status).toBe(429);
+    // Probes at 0, 20, 60 ms; the next one waits out the doubled 80 ms cooldown.
+    expect(starts[probes] - starts[probes - 1]).toBeGreaterThanOrEqual(70);
+  });
+
   it('a garbled tool-call block is asked again instead of ending the turn', async () => {
     const garbled = ['<｜DSML｜function_calls>',
       '<｜｜DSML｜｜ parameter name="command" string="true">pwd</｜｜DSML｜｜ parameter>',

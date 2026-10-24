@@ -21,8 +21,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import { buildWebPrompt, estimateTokens, type Message, type ToolDef } from '../core/provider.js';
 
-/** Cooldown when the provider answers "too frequent"; exported for tests. */
-export const rateLimitCooldown = { firstWaitMs: 5_000, maxWaitMs: 180_000 };
+/**
+ * Cooldown when the provider answers "too frequent"; exported for tests.
+ * maxWaitMs bounds one request's hold; capMs bounds the gap between probes
+ * (a lockout on 2026-10-24 lasted ~10 min).
+ */
+export const rateLimitCooldown = { firstWaitMs: 5_000, maxWaitMs: 180_000, capMs: 600_000 };
 
 /** One provider call and what the route needs to decide whether to retry it. */
 interface AttemptResult {
@@ -36,6 +40,9 @@ interface AttemptResult {
 
 export function anthropicRoutes(registry: ProviderRegistry, queue = new ProviderQueue(requestPacing)): Hono {
   const app = new Hono();
+  // Per provider, across requests: Claude Code re-sends a 429 at once, and a
+  // per-request cooldown restarted at 5 s each time, probing all through a lockout.
+  const cooldowns = new Map<string, { until: number; wait: number }>();
 
   app.post('/v1/messages', async (c) => {
     let body: any;
@@ -111,13 +118,29 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     // Waiting inside the lane also holds back every queued request (other subagents);
     // a 429 at once let each agent retry on its own and hit the limit again.
     async function paced() {
-      for (let wait = rateLimitCooldown.firstWaitMs, waited = 0; ; waited += wait, wait *= 2) {
-        const r = await attempt();
+      const id = provider.info.id;
+      const coolingDown: AttemptResult = {
+        text: '', thinking: '', error: `${id}: still cooling down after "too frequent"`,
+        code: 'upstream_rate_limit', stopReason: 'end_turn', possiblySent: false,
+      };
+      let r: AttemptResult | undefined;
+      for (let waited = 0; ; ) {
+        const cd = cooldowns.get(id);
+        const ms = cd ? cd.until - Date.now() : 0;
+        if (ms > 0) {
+          // Hold the request up to its budget, then 429 without probing.
+          const nap = Math.min(ms, rateLimitCooldown.maxWaitMs - waited);
+          // Abort cuts the cooldown so the lane is released to the next request.
+          try { await sleep(nap, undefined, { signal }); } catch { return r ?? coolingDown; }
+          waited += nap;
+          if (nap < ms) return r ?? coolingDown;
+        }
+        r = await attempt();
         if (signal.aborted) return r;
-        if (!(failed(r) && r.code === 'upstream_rate_limit') || waited + wait > rateLimitCooldown.maxWaitMs) return r;
-        console.warn(`[${provider.info.id}] ${new Date().toISOString()} rate limited, retrying in ${wait / 1000}s`);
-        // Abort cuts the cooldown so the lane is released to the next request.
-        try { await sleep(wait, undefined, { signal }); } catch { return r; }
+        if (!(failed(r) && r.code === 'upstream_rate_limit')) { cooldowns.delete(id); return r; }
+        const wait = Math.min(cd ? cd.wait * 2 : rateLimitCooldown.firstWaitMs, rateLimitCooldown.capMs);
+        cooldowns.set(id, { until: Date.now() + wait, wait });
+        console.warn(`[${id}] ${new Date().toISOString()} rate limited, next try in ${wait / 1000}s`);
       }
     }
 
