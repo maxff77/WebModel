@@ -14,13 +14,14 @@ function envNumber(raw: string | undefined, fallback: number, min: number): numb
 
 /**
  * Start-rate pacing per provider, separate from the 429 cooldown in the route.
- * One model call costs 3 upstream HTTP requests; 20 starts/min leaves typical
- * 3-9 call/min sessions uncapped, while the 1s gap adds up to 1s to sub-second
- * follow-ups (measured +0.4s average). Env-overridable without a rebuild.
+ * One model call costs 3 upstream HTTP requests. 10 starts/min with a 6s gap
+ * spreads them evenly: a 1s gap let bursts through (7 in ~17s got DeepSeek's
+ * "too frequent", and a ~1h account lockout followed one). Typical sessions run
+ * 6-7 calls/min, so only fast tool-call streaks slow down. Env-overridable.
  */
 export const requestPacing: QueueOptions = {
-  minGapMs: envNumber(process.env.WMB_MIN_GAP_MS, 1_000, 0),
-  maxPerWindow: envNumber(process.env.WMB_MAX_RPM, 20, 1),
+  minGapMs: envNumber(process.env.WMB_MIN_GAP_MS, 6_000, 0),
+  maxPerWindow: envNumber(process.env.WMB_MAX_RPM, 10, 1),
 };
 
 export class ProviderQueue {
