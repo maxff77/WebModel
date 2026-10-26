@@ -11,6 +11,7 @@ import { FINGERPRINT_COOKIE_WARNING, ProfileError, ProfileStore, type ResolvedPr
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
+import { ProviderPool } from './core/pool.js';
 import { KimiProvider } from './providers/kimi-web/index.js';
 import { QwenProvider } from './providers/qwen-web/index.js';
 import { GLMProvider } from './providers/glm-web/index.js';
@@ -156,16 +157,22 @@ program
     const stateDir = opts.stateDir;
     mkdirSync(stateDir, { recursive: true });
 
-    const config = loadConfig({
-      stateDir,
-      configFile: opts.config,
-      port: opts.port,
-      host: opts.host,
-      authToken: opts.authToken,
-      engine: opts.engine,
-      profile: opts.profile,
-      verbose: opts.verbose,
-    });
+    let config: ReturnType<typeof loadConfig>;
+    try {
+      config = loadConfig({
+        stateDir,
+        configFile: opts.config,
+        port: opts.port,
+        host: opts.host,
+        authToken: opts.authToken,
+        engine: opts.engine,
+        profile: opts.profile,
+        verbose: opts.verbose,
+      });
+    } catch (err) {
+      console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+      process.exit(1);
+    }
 
     // ── Step 0: Profiles ──
     // A profile bundles an account identity: immutable engine, own dir, fingerprint.
@@ -304,6 +311,52 @@ program
       }
     }
 
+    // ── Step 4a: DeepSeek accounts in turn ──
+    // Each profile is one account with its own auth state and token. It uses the main
+    // browser while that is on its profile (Chromium refuses a second launch on one
+    // dir), else a browser of its own, opened on its first call.
+    const poolBrowsers = new Map<string, BrowserManager>();
+    const poolAuth = new Map<string, AuthStore>();
+    if (config.deepseek.profiles.length > 0 && enabled.has('deepseek-web')) {
+      const members = config.deepseek.profiles.map((name) => {
+        let profile: ResolvedProfile;
+        try {
+          profile = profiles.resolve(name);
+        } catch (err) {
+          if (!(err instanceof ProfileError)) throw err;
+          console.log(chalk.red(`  ✗ deepseek.profiles: ${err.message}`));
+          process.exit(1);
+        }
+        const attachError = attachProfileError(profile, requestedMode);
+        if (attachError) {
+          console.log(chalk.red(`  ✗ deepseek.profiles: ${attachError}`));
+          process.exit(1);
+        }
+        const auth = new AuthStore(stateDir, () => name);
+        poolAuth.set(name, auth);
+        const browserFor = () => {
+          if (browserManager.getProfile().name === name) return browserManager;
+          let own = poolBrowsers.get(name);
+          if (!own) {
+            own = new BrowserManager({
+              profile,
+              startupTimeout: config.browser.startupTimeout,
+              idleShutdown: config.browser.idleShutdown,
+              loginTimeout: config.browser.loginTimeout,
+              headless: config.browser.headless,
+              cdpUrl,
+              mode: effectiveMode(profile.engine, requestedMode),
+            });
+            poolBrowsers.set(name, own);
+          }
+          return own;
+        };
+        return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserFor().getPageForOrigin(origin)) };
+      });
+      registry.register(new ProviderPool(members));
+      console.log(chalk.green('  ✓') + ` DeepSeek accounts in turn: ${config.deepseek.profiles.join(', ')}`);
+    }
+
     // ── Step 4b: Auto-detect authenticated providers via cookies ──
     if (browserMode === 'attach' && await checkCDP(cdpUrl)) {
       try {
@@ -336,6 +389,9 @@ program
         create: (name, engine) => profiles.create(name, engine),
         activate: async (name) => {
           const profile = profiles.resolve(name);
+          // The turn may hold this profile's browser open; close it before the main one takes the dir.
+          await poolBrowsers.get(name)?.shutdown();
+          poolBrowsers.delete(name);
           await browserManager.activate(profile);
           writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
           return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
@@ -350,6 +406,7 @@ program
         await browserManager.startLogin(providerId, provider.info.loginUrl, (success, profile) => {
           if (success) {
             authStore.setStatus(providerId, 'active', profile);
+            poolAuth.get(profile)?.reload();
             console.log(chalk.green(`  ✓ ${providerId} login completed. Cookies saved.`));
           } else {
             console.log(chalk.yellow(`  ⚠ ${providerId} login did not complete.`));
@@ -403,7 +460,7 @@ program
 
     process.on('SIGINT', async () => {
       console.log(chalk.gray('\n  Shutting down...'));
-      await browserManager.shutdown();
+      await Promise.all([browserManager, ...poolBrowsers.values()].map(m => m.shutdown()));
       process.exit(0);
     });
   });

@@ -354,7 +354,7 @@ export class DeepSeekProvider extends BaseProvider {
         // 2026-10-24: {"data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"mute_until":<epoch s>}}}, a multi-day sanction.
         const mutedUntil = /"is_muted":1/.test(body) ? Number(body.match(/"mute_until":([\d.]+)/)?.[1]) : NaN;
         if (mutedUntil > 0) {
-          yield { type: 'error', message: `DeepSeek: account muted until ${new Date(mutedUntil * 1000).toISOString()}`, code: 'account_muted', possiblySent };
+          yield { type: 'error', message: `DeepSeek: account muted until ${new Date(mutedUntil * 1000).toISOString()}`, code: 'account_muted', until: mutedUntil * 1000, possiblySent };
           return;
         }
         yield { type: 'error', message: `DeepSeek: completion was not a stream: ${body}`, possiblySent };

@@ -25,6 +25,10 @@ export interface BridgeConfig {
     mode: 'attach' | 'launch';
     cdpUrl: string;
   };
+  deepseek: {
+    /** Profiles whose DeepSeek accounts take calls in turn; empty = the active profile only. */
+    profiles: string[];
+  };
   providers: {
     enabled: string[];
     /** Serves requests for a model no provider has; null answers them 400 invalid_model. */
@@ -58,6 +62,9 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       headless: true,
       mode: 'attach',
       cdpUrl: 'http://127.0.0.1:9222',
+    },
+    deepseek: {
+      profiles: [],
     },
     providers: {
       enabled: [
@@ -113,6 +120,11 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   }
   if (config.logging.file === defaultConfig('__placeholder__').logging.file) {
     config.logging.file = join(opts.stateDir, 'logs', 'bridge.log');
+  }
+
+  const pool: unknown[] = Array.isArray(config.deepseek.profiles) ? config.deepseek.profiles : [null];
+  if (pool.some(n => typeof n !== 'string' || !n) || new Set(pool).size !== pool.length) {
+    throw new Error('deepseek.profiles must be a list of distinct profile names.');
   }
 
   // An invalid engine in YAML falls back to chrome. A bad CLI/env override is ignored.
