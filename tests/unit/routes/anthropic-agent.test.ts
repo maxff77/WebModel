@@ -249,6 +249,19 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(calls).toBe(1);
   });
 
+  it('a muted account is a 403 asked once, so Claude Code stops probing it', async () => {
+    let calls = 0;
+    const muted = new CapturingProvider('');
+    muted.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek: account muted until 2026-10-27T18:38:15.460Z', code: 'account_muted' };
+    };
+    const res = await post(muted, true);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'permission_error' } });
+    expect(calls).toBe(1);
+  });
+
   // The client may give up (Claude Code timeout, user cancel) while its turn waits
   // in the lane. Abandoned work must not reach the shared browser tab.
   it('client already gone: the provider is never asked', async () => {

@@ -150,7 +150,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     const run = () => queue.enqueue(provider.info.id, paced, signal);
     let reply = await run();
     if (signal.aborted) return disconnected();
-    if (failed(reply) && !reply.possiblySent && reply.code !== 'upstream_rate_limit' && reply.code !== 'auth_expired') reply = await run();
+    if (failed(reply) && !reply.possiblySent && !['upstream_rate_limit', 'auth_expired', 'account_muted'].includes(reply.code ?? '')) reply = await run();
     if (signal.aborted) return disconnected();
 
     // Nothing usable: answer like the real API does, so Claude Code retries
@@ -160,6 +160,10 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       if (reply.code === 'auth_expired') {
         const res = errorToHttpResponse(new AuthExpiredError(provider.info.id));
         return c.json(res.body, res.status as any);
+      }
+      // Muted for days: a 502 or 429 makes Claude Code keep probing the sanctioned account.
+      if (reply.code === 'account_muted') {
+        return c.json({ type: 'error', error: { type: 'permission_error', message: reply.error } }, 403);
       }
       const limited = reply.code === 'upstream_rate_limit';
       return c.json(
