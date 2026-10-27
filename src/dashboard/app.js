@@ -231,6 +231,14 @@ async function loadProfiles() {
           activateProfile(p.name);
         });
         right.appendChild(btn);
+
+        var delBtn = document.createElement('button');
+        delBtn.className = 'btn-danger';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', function () {
+          deleteProfile(p.name);
+        });
+        right.appendChild(delBtn);
       }
       row.appendChild(right);
       list.appendChild(row);
@@ -290,6 +298,23 @@ async function activateProfile(name) {
     loadHealth();
   } catch (err) {
     showToast('Could not switch profiles: ' + err.message);
+  }
+}
+
+async function deleteProfile(name) {
+  var ok = confirm('Delete profile "' + name + '"?\n\nIts browser data and logins are erased. This cannot be undone.');
+  if (!ok) return;
+  try {
+    var res = await fetch('/webmodel/profiles/' + encodeURIComponent(name), { method: 'DELETE' });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast(data.message || 'Could not delete the profile');
+      return;
+    }
+    showToast('Deleted profile ' + data.deleted);
+    loadProfiles();
+  } catch (err) {
+    showToast('Could not delete the profile: ' + err.message);
   }
 }
 

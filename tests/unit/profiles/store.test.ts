@@ -131,6 +131,47 @@ describe('ProfileStore', () => {
     expect(() => store.resolve('work')).toThrow(/fallback "ghost".*does not exist/i);
   });
 
+  it('deletes a profile with its data and login state', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('work', 'chrome');
+    await store.create('personal', 'chrome');
+    writeFileSync(join(stateDir, 'profiles', 'work', 'auth.json'), '{}');
+
+    store.delete('work');
+
+    expect(existsSync(join(stateDir, 'profiles', 'work'))).toBe(false);
+    expect(store.list().map((p) => p.name)).toEqual(['personal']);
+  });
+
+  it('reports deleting an unknown profile as not found', () => {
+    const store = new ProfileStore(stateDir);
+
+    expect(() => store.delete('ghost')).toThrow(expect.objectContaining({ code: 'not_found' }));
+  });
+
+  it('refuses to delete a profile another one falls back to', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('work', 'chrome');
+    await store.create('personal', 'chrome');
+    setFallback('work', 'personal');
+
+    expect(() => store.delete('personal')).toThrow(/"work" falls back to "personal"/);
+    expect(store.get('personal')).toBeDefined();
+  });
+
+  it('never deletes outside the profiles directory', () => {
+    const store = new ProfileStore(stateDir);
+    // A manifest whose name matches the path, so only the name check stops it.
+    mkdirSync(join(stateDir, 'outside'), { recursive: true });
+    writeFileSync(
+      join(stateDir, 'outside', 'manifest.json'),
+      JSON.stringify({ name: '../outside', engine: 'chrome', createdAt: '2026-10-27T00:00:00.000Z' }),
+    );
+
+    expect(() => store.delete('../outside')).toThrow(expect.objectContaining({ code: 'not_found' }));
+    expect(existsSync(join(stateDir, 'outside'))).toBe(true);
+  });
+
 });
 
 describe('ProfileStore legacy migration', () => {

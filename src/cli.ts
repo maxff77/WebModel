@@ -340,6 +340,13 @@ program
           writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
           return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
         },
+        delete: async (name) => {
+          // The browser holds the profile it runs on, which may be a fallback.
+          if (name === browserManager.getProfile().name) {
+            throw new Error(`"${name}" is the profile in use; switch to another one first.`);
+          }
+          profiles.delete(name);
+        },
       },
       onLogin: async (providerId: string) => {
         const provider = registry.getProvider(providerId);

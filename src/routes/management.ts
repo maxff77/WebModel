@@ -11,6 +11,7 @@ export interface ProfilesApi {
   active: () => string;
   create: (name: string, engine: BrowserEngine) => Promise<ProfileManifest>;
   activate: (name: string) => Promise<ProfileManifest>;
+  delete: (name: string) => Promise<void>;
 }
 
 export interface ManagementDeps {
@@ -165,6 +166,21 @@ export function managementRoutes(deps: ManagementDeps): Hono {
       }
       // The manager refused the switch (e.g. attach only serves the default profile).
       return c.json({ error: 'Profile switch refused', message: (err as Error).message }, 409);
+    }
+  });
+
+  app.delete('/webmodel/profiles/:name', async (c) => {
+    if (!deps.profiles) return c.json({ error: 'Profiles not available' }, 503);
+    const name = c.req.param('name');
+    try {
+      await deps.profiles.delete(name);
+      return c.json({ deleted: name });
+    } catch (err) {
+      if (err instanceof ProfileError && err.code === 'not_found') {
+        return c.json({ error: 'Unknown profile', message: err.message }, 404);
+      }
+      // The profile is in use or another profile falls back to it.
+      return c.json({ error: 'Profile delete refused', message: (err as Error).message }, 409);
     }
   });
 

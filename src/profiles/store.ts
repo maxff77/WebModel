@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrowserEngine } from '../browser/manager.js';
 
@@ -132,6 +132,20 @@ export class ProfileStore {
     const root = this.profileRoot(name);
     mkdirSync(join(root, 'data'), { recursive: true });
     return this.writeManifest(root, name, engine);
+  }
+
+  /** Remove a profile with its browser data and login state; there is no undo. */
+  delete(name: string): void {
+    // The name check keeps a crafted name like "../x" inside the profiles dir.
+    if (!NAME_RE.test(name) || !this.get(name)) throw unknownProfile(name);
+    const dependent = this.list().find((profile) => profile.fallbackProfile === name);
+    if (dependent) {
+      throw new ProfileError(
+        `"${dependent.name}" falls back to "${name}"; give "${dependent.name}" another fallback first.`,
+        'invalid',
+      );
+    }
+    rmSync(this.profileRoot(name), { recursive: true, force: true });
   }
 
   /**

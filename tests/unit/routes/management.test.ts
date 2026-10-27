@@ -17,6 +17,7 @@ function profileApi(stateDir: string): ProfilesApi {
       active = profile.name;
       return profile;
     },
+    delete: async (name) => store.delete(name),
   };
 }
 
@@ -153,6 +154,42 @@ describe('Management endpoints', () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).message).toMatch(/only available to the "default" profile/);
+    });
+
+    it('deletes a profile', async () => {
+      ctx = createTestContext({ profiles: profileApi });
+      await ctx.app.request('/webmodel/profiles', json({ name: 'work', engine: 'chrome' }));
+
+      const res = await ctx.app.request('/webmodel/profiles/work', { method: 'DELETE' });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ deleted: 'work' });
+      const listed = await (await ctx.app.request('/webmodel/profiles')).json();
+      expect(listed.profiles).toEqual([]);
+    });
+
+    it('reports deleting an unknown profile as 404', async () => {
+      ctx = createTestContext({ profiles: profileApi });
+
+      const res = await ctx.app.request('/webmodel/profiles/ghost', { method: 'DELETE' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('refuses to delete the profile in use', async () => {
+      ctx = createTestContext({
+        profiles: (stateDir) => ({
+          ...profileApi(stateDir),
+          delete: async () => {
+            throw new Error('"work" is the profile in use; switch to another one first.');
+          },
+        }),
+      });
+
+      const res = await ctx.app.request('/webmodel/profiles/work', { method: 'DELETE' });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).message).toMatch(/profile in use/);
     });
 
     it('returns 503 when profiles are not wired', async () => {
