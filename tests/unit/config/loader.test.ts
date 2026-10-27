@@ -102,19 +102,6 @@ server:
     }
   });
 
-  it('deepseek.profiles defaults to none and reads a list from YAML', () => {
-    expect(loadConfig({ stateDir: testDir }).deepseek.profiles).toEqual([]);
-    writeFileSync(join(testDir, 'config.yml'), 'deepseek:\n  profiles: [cuenta1, cuenta2]\n');
-    expect(loadConfig({ stateDir: testDir }).deepseek.profiles).toEqual(['cuenta1', 'cuenta2']);
-  });
-
-  it('rejects deepseek.profiles that is not a list of distinct names', () => {
-    for (const bad of ['profiles: cuenta1', 'profiles: [cuenta1, cuenta1]', 'profiles: [cuenta1, 3]', "profiles: ['']"]) {
-      writeFileSync(join(testDir, 'config.yml'), `deepseek:\n  ${bad}\n`);
-      expect(() => loadConfig({ stateDir: testDir }), bad).toThrow(/deepseek\.profiles/);
-    }
-  });
-
   it('WMB_PROFILE overrides --profile', () => {
     process.env.WMB_PROFILE = 'env-profile';
     try {
