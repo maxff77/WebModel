@@ -86,33 +86,20 @@ describe('BrowserManager profiles', () => {
     expect(chromeLaunch).not.toHaveBeenCalled();
   });
 
-  it('passes the persisted fingerprint to the camoufox launcher', async () => {
-    const launch = vi.fn().mockResolvedValue({} as BrowserContext);
-    const fingerprint = { navigator: { userAgent: 'firefox' } };
-    const manager = makeManager(
-      { camoufox: launch },
-      { profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data', fingerprint } },
-    );
-
-    await manager.ensureBrowser();
-
-    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ fingerprint }));
-  });
-
-  it('uses a fingerprint regenerated on disk on the next launch', async () => {
+  it('re-reads the profile on the next launch', async () => {
     const profile = { name: 'ff', engine: 'camoufox' as const, dir: '/tmp/p/ff/data' };
-    let persisted = { ...profile, fingerprint: { seed: 1 } };
+    let persisted = { ...profile };
     const launch = vi.fn().mockResolvedValue(fakeContext());
     const manager = makeManager({ camoufox: launch }, { profile, resolveProfile: () => persisted });
 
     await manager.ensureBrowser();
-    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ fingerprint: { seed: 1 } }));
+    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ profileDir: '/tmp/p/ff/data' }));
 
-    persisted = { ...profile, fingerprint: { seed: 2 } };
+    persisted = { ...profile, dir: '/tmp/p/ff/new' };
     await manager.shutdown();
     await manager.ensureBrowser();
 
-    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ fingerprint: { seed: 2 } }));
+    expect(launch).toHaveBeenLastCalledWith(expect.objectContaining({ profileDir: '/tmp/p/ff/new' }));
   });
 
   it('keeps the cached profile when it cannot be re-read at launch', async () => {
@@ -120,7 +107,7 @@ describe('BrowserManager profiles', () => {
     const manager = makeManager(
       { camoufox: launch },
       {
-        profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data', fingerprint: { seed: 1 } },
+        profile: { name: 'ff', engine: 'camoufox', dir: '/tmp/p/ff/data' },
         resolveProfile: () => {
           throw new Error('broken manifest');
         },
@@ -129,7 +116,7 @@ describe('BrowserManager profiles', () => {
 
     await manager.ensureBrowser();
 
-    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ fingerprint: { seed: 1 } }));
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ profileDir: '/tmp/p/ff/data' }));
     expect(manager.getProfile().name).toBe('ff');
   });
 
@@ -157,6 +144,19 @@ describe('BrowserManager profiles', () => {
     const manager = makeManager({ chrome: launch });
 
     await expect(manager.ensureBrowser()).rejects.toThrow('browser failed to start');
+  });
+
+  it('launches a cloakbrowser profile with its own launcher even in attach mode', async () => {
+    const context = {} as BrowserContext;
+    const launch = vi.fn().mockResolvedValue(context);
+    const manager = makeManager(
+      { chrome: vi.fn(), cloakbrowser: launch },
+      { profile: { name: 'cb', engine: 'cloakbrowser', dir: '/tmp/p/cb/data' }, mode: 'attach' },
+    );
+
+    expect(manager.getMode()).toBe('launch');
+    await expect(manager.ensureBrowser()).resolves.toBe(context);
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ profileDir: '/tmp/p/cb/data' }));
   });
 
   it('launches camoufox when attach mode is requested', async () => {

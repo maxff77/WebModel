@@ -4,14 +4,13 @@ import { AuthStore } from '../auth/store.js';
 import type { BrowserEngine, BrowserStatus, LoginState } from '../browser/manager.js';
 import { isBrowserEngine } from '../browser/manager.js';
 import type { MetricsCollector } from '../core/metrics.js';
-import { DEFAULT_PROFILE, FINGERPRINT_COOKIE_WARNING, ProfileError, type ProfileManifest, type ResolvedProfile } from '../profiles/store.js';
+import { DEFAULT_PROFILE, ProfileError, type ProfileManifest } from '../profiles/store.js';
 
 export interface ProfilesApi {
   list: () => ProfileManifest[];
   active: () => string;
   create: (name: string, engine: BrowserEngine) => Promise<ProfileManifest>;
   activate: (name: string) => Promise<ProfileManifest>;
-  regenerateFingerprint: (name: string) => Promise<ResolvedProfile>;
 }
 
 export interface ManagementDeps {
@@ -127,7 +126,6 @@ export function managementRoutes(deps: ManagementDeps): Hono {
     return c.json({
       active: deps.profiles.active(),
       profiles: deps.profiles.list(),
-      warning: FINGERPRINT_COOKIE_WARNING,
     });
   });
 
@@ -137,7 +135,7 @@ export function managementRoutes(deps: ManagementDeps): Hono {
     if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
     const engine = body.engine;
     if (!isBrowserEngine(engine)) {
-      return c.json({ error: 'Invalid engine', message: 'Engine must be "chrome" or "camoufox".' }, 400);
+      return c.json({ error: 'Invalid engine', message: 'Engine must be "chrome", "camoufox" or "cloakbrowser".' }, 400);
     }
     const name = typeof body.name === 'string' ? body.name : '';
     try {
@@ -150,26 +148,6 @@ export function managementRoutes(deps: ManagementDeps): Hono {
         return c.json({ error, message: err.message }, status);
       }
       return c.json({ error: 'Could not create the profile', message: (err as Error).message }, 500);
-    }
-  });
-
-  app.post('/webmodel/profiles/fingerprint', async (c) => {
-    if (!deps.profiles) return c.json({ error: 'Profiles not available' }, 503);
-    const body = await readJson<{ name?: unknown }>(c);
-    if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
-    const name = typeof body.name === 'string' ? body.name : '';
-    try {
-      const profile = await deps.profiles.regenerateFingerprint(name);
-      return c.json({ profile, warning: FINGERPRINT_COOKIE_WARNING });
-    } catch (err) {
-      if (err instanceof ProfileError) {
-        const notFound = err.code === 'not_found';
-        return c.json({
-          error: notFound ? 'Unknown profile' : 'Cannot regenerate fingerprint',
-          message: err.message,
-        }, notFound ? 404 : 400);
-      }
-      return c.json({ error: 'Could not regenerate the fingerprint', message: (err as Error).message }, 500);
     }
   });
 

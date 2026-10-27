@@ -4,11 +4,6 @@ import type { BrowserEngine } from '../browser/manager.js';
 
 export const DEFAULT_PROFILE = 'default';
 
-/** Shown whenever a fingerprint changes on a profile that keeps its cookies. */
-export const FINGERPRINT_COOKIE_WARNING =
-  'Keeping the existing cookies with a new fingerprint is more suspicious than a clean profile. ' +
-  'Cookies and login were left untouched; the new fingerprint applies the next time the profile starts.';
-
 export interface ProfileManifest {
   name: string;
   engine: BrowserEngine;
@@ -20,8 +15,6 @@ export interface ProfileManifest {
 export interface ResolvedProfile extends ProfileManifest {
   /** Browser user-data directory: `<stateDir>/profiles/<name>/data`. */
   dir: string;
-  /** Persisted fingerprint; only engines that support one (Camoufox) have it. */
-  fingerprint?: unknown;
 }
 
 export type ProfileErrorCode = 'invalid' | 'exists' | 'not_found';
@@ -31,11 +24,6 @@ export class ProfileError extends Error {
     super(message);
     this.name = 'ProfileError';
   }
-}
-
-export interface ProfileStoreOptions {
-  /** Test seam; the real generator is the optional camoufox-js dependency. */
-  generateFingerprint?: () => unknown;
 }
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -52,7 +40,7 @@ function unknownProfile(name: string): ProfileError {
  * the source of truth, config only names the active profile.
  */
 export class ProfileStore {
-  constructor(private stateDir: string, private opts: ProfileStoreOptions = {}) {}
+  constructor(private stateDir: string) {}
 
   private get root(): string {
     return join(this.stateDir, 'profiles');
@@ -70,7 +58,7 @@ export class ProfileStore {
     try {
       const parsed = JSON.parse(readFileSync(join(this.profileRoot(name), 'manifest.json'), 'utf-8'));
       const { engine, createdAt, fallbackProfile } = parsed ?? {};
-      if (parsed?.name !== name || (engine !== 'chrome' && engine !== 'camoufox') || typeof createdAt !== 'string') {
+      if (parsed?.name !== name || (engine !== 'chrome' && engine !== 'camoufox' && engine !== 'cloakbrowser') || typeof createdAt !== 'string') {
         return undefined;
       }
       if (fallbackProfile !== undefined && typeof fallbackProfile !== 'string') return undefined;
@@ -109,7 +97,7 @@ export class ProfileStore {
         'not_found',
       );
     }
-    return { ...manifest, dir: this.dataDir(name), fingerprint: this.readFingerprint(name) };
+    return { ...manifest, dir: this.dataDir(name) };
   }
 
   /** Declare the profile that serves requests when `name` fails to start. */
@@ -130,7 +118,7 @@ export class ProfileStore {
     return updated;
   }
 
-  async create(name: string, engine: BrowserEngine): Promise<ProfileManifest> {
+  create(name: string, engine: BrowserEngine): ProfileManifest {
     if (!NAME_RE.test(name)) {
       throw new ProfileError(
         `Invalid profile name "${name}". Use 1-32 characters: lowercase letters, digits, "-" or "_", starting with a letter or digit.`,
@@ -141,31 +129,9 @@ export class ProfileStore {
       throw new ProfileError(`Profile "${name}" already exists; a profile's engine cannot be changed.`, 'exists');
     }
 
-    // Generate before touching disk so a missing camoufox dependency leaves nothing behind.
-    const fingerprint = engine === 'camoufox' ? await this.generateFingerprint() : undefined;
-
     const root = this.profileRoot(name);
     mkdirSync(join(root, 'data'), { recursive: true });
-    if (fingerprint !== undefined) this.writeFingerprint(root, fingerprint);
     return this.writeManifest(root, name, engine);
-  }
-
-  /**
-   * Generate and persist a new fingerprint without touching the profile data
-   * (cookies, login). The launcher reads it on the profile's next start.
-   */
-  async regenerateFingerprint(name: string): Promise<ResolvedProfile> {
-    const manifest = this.get(name);
-    if (!manifest) throw unknownProfile(name);
-    if (manifest.engine !== 'camoufox') {
-      throw new ProfileError(`Profile "${name}" uses the chrome engine, which has no fingerprint.`, 'invalid');
-    }
-    const fingerprint = await this.generateFingerprint();
-    if (fingerprint === undefined) {
-      throw new Error('The fingerprint generator returned no fingerprint.');
-    }
-    this.writeFingerprint(this.profileRoot(name), fingerprint);
-    return { ...manifest, dir: this.dataDir(name), fingerprint: this.readFingerprint(name) };
   }
 
   /**
@@ -204,48 +170,12 @@ export class ProfileStore {
       mkdirSync(join(root, 'data'), { recursive: true });
     }
 
-    if (engine === 'camoufox') {
-      try {
-        this.writeFingerprint(root, await this.generateFingerprint());
-      } catch {
-        // Optional dependency missing; the camoufox launcher reports the fix
-        // when the profile is launched.
-      }
-    }
-
     this.writeManifest(root, DEFAULT_PROFILE, engine);
-  }
-
-  private readFingerprint(name: string): unknown {
-    try {
-      return JSON.parse(readFileSync(join(this.profileRoot(name), 'fingerprint.json'), 'utf-8'));
-    } catch {
-      return undefined;
-    }
-  }
-
-  private writeFingerprint(root: string, fingerprint: unknown): void {
-    writeFileSync(join(root, 'fingerprint.json'), JSON.stringify(fingerprint, null, 2));
   }
 
   private writeManifest(root: string, name: string, engine: BrowserEngine): ProfileManifest {
     const manifest: ProfileManifest = { name, engine, createdAt: new Date().toISOString() };
     writeFileSync(join(root, 'manifest.json'), JSON.stringify(manifest, null, 2));
     return manifest;
-  }
-
-  private async generateFingerprint(): Promise<unknown> {
-    if (this.opts.generateFingerprint) return this.opts.generateFingerprint();
-    let generate: () => unknown;
-    try {
-      // Deep import: the generator is not re-exported from the package index.
-      ({ generateFingerprint: generate } = await import('camoufox-js/dist/fingerprints.js' as string));
-    } catch (err) {
-      throw new Error(
-        `Cannot create a camoufox profile because camoufox-js is not installed: ${(err as Error).message}\n` +
-        'Run: npm install camoufox-js',
-      );
-    }
-    return generate();
   }
 }

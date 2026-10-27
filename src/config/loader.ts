@@ -58,7 +58,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       profileDir: join(stateDir, 'chrome-profile'),
       startupTimeout: 30000,
       idleShutdown: 300,
-      loginTimeout: 120,
+      loginTimeout: 600,
       headless: true,
       mode: 'attach',
       cdpUrl: 'http://127.0.0.1:9222',

@@ -7,7 +7,7 @@ import { loadConfig, writeActiveProfile } from './config/loader.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
 import { BrowserManager, attachProfileError, effectiveMode, isBrowserEngine } from './browser/manager.js';
-import { FINGERPRINT_COOKIE_WARNING, ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
+import { ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
@@ -148,7 +148,7 @@ program
   .option('--config <file>', 'config file path')
   .option('-v, --verbose', 'verbose logging')
   .option('--browser-mode <mode>', 'browser mode: attach (default) or launch', 'attach')
-  .option('--engine <engine>', 'engine for a newly created default profile: chrome (default) or camoufox')
+  .option('--engine <engine>', 'engine for a newly created default profile: chrome (default), camoufox or cloakbrowser')
   .option('--profile <name>', 'active browser profile (default: default)')
   .option('--cdp-url <url>', 'Chrome CDP URL for attach mode', 'http://127.0.0.1:9222')
   .action(async (opts) => {
@@ -175,7 +175,7 @@ program
     }
 
     // ── Step 0: Profiles ──
-    // A profile bundles an account identity: immutable engine, own dir, fingerprint.
+    // A profile bundles an account identity: immutable engine and its own dir.
     const profiles = new ProfileStore(stateDir);
     await profiles.migrateLegacy(config.browser.engine, config.browser.profileDir);
     let active: ResolvedProfile;
@@ -215,7 +215,7 @@ program
     const requestedMode = (opts.browserMode === 'launch' ? 'launch' : 'attach') as 'attach' | 'launch';
     const browserMode = effectiveMode(active.engine, requestedMode);
     if (browserMode !== requestedMode) {
-      console.log(chalk.yellow('  ⚠ Camoufox does not support attach mode; starting in launch mode.'));
+      console.log(chalk.yellow(`  ⚠ Attach mode is only for your own Chrome; the ${active.engine} engine starts in launch mode.`));
     }
     const attachError = attachProfileError(active, requestedMode);
     if (attachError) {
@@ -386,7 +386,7 @@ program
       profiles: {
         list: () => profiles.list(),
         active: () => browserManager.getProfile().name,
-        create: (name, engine) => profiles.create(name, engine),
+        create: async (name, engine) => profiles.create(name, engine),
         activate: async (name) => {
           const profile = profiles.resolve(name);
           // The turn may hold this profile's browser open; close it before the main one takes the dir.
@@ -396,7 +396,6 @@ program
           writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
           return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
         },
-        regenerateFingerprint: (name) => profiles.regenerateFingerprint(name),
       },
       onLogin: async (providerId: string) => {
         const provider = registry.getProvider(providerId);
@@ -417,7 +416,7 @@ program
           status: 'login_started',
           message: browserMode === 'attach'
             ? 'A new tab opened in your Chrome. Log in and close the tab when done.'
-            : `A ${active.engine === 'camoufox' ? 'Camoufox' : 'Chrome'} window opened. Log in and close it when done.`,
+            : `A ${{ chrome: 'Chrome', camoufox: 'Camoufox', cloakbrowser: 'CloakBrowser' }[active.engine]} window opened. Log in and close it when done.`,
         };
       },
       getLoginState: () => browserManager.getLoginState(),
@@ -501,7 +500,7 @@ profileCommand
     const { stateDir, config: configFile, engine: requestedEngine } = program.opts();
     const engine = requestedEngine === undefined ? 'chrome' : isBrowserEngine(requestedEngine) ? requestedEngine : null;
     if (!engine) {
-      console.log(chalk.red(`  ✗ Unknown engine "${requestedEngine}". Use chrome or camoufox.`));
+      console.log(chalk.red(`  ✗ Unknown engine "${requestedEngine}". Use chrome, camoufox or cloakbrowser.`));
       process.exitCode = 1;
       return;
     }
@@ -510,27 +509,9 @@ profileCommand
     const store = new ProfileStore(stateDir);
     await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
     try {
-      const profile = await store.create(name, engine);
+      const profile = store.create(name, engine);
       console.log(chalk.green('  ✓') + ` Created profile "${profile.name}" (${profile.engine})`);
       console.log(chalk.gray(`    ${store.dataDir(profile.name)}`));
-    } catch (err) {
-      console.log(chalk.red(`  ✗ ${(err as Error).message}`));
-      process.exitCode = 1;
-    }
-  });
-
-profileCommand
-  .command('regenerate <name>')
-  .description('Generate a new fingerprint for a camoufox profile; cookies and login are kept')
-  .action(async (name: string) => {
-    const { stateDir, config: configFile } = program.opts();
-    const config = loadConfig({ stateDir, configFile });
-    const store = new ProfileStore(stateDir);
-    await store.migrateLegacy(config.browser.engine, config.browser.profileDir);
-    try {
-      const profile = await store.regenerateFingerprint(name);
-      console.log(chalk.green('  ✓') + ` New fingerprint saved for "${profile.name}"`);
-      console.log(chalk.yellow('  ⚠') + ` ${FINGERPRINT_COOKIE_WARNING}`);
     } catch (err) {
       console.log(chalk.red(`  ✗ ${(err as Error).message}`));
       process.exitCode = 1;

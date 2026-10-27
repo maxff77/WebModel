@@ -26,7 +26,7 @@ describe('Config loader', () => {
     expect(config.browser.profileDir).toBe(join(testDir, 'chrome-profile'));
     expect(config.browser.startupTimeout).toBe(30000);
     expect(config.browser.idleShutdown).toBe(300);
-    expect(config.browser.loginTimeout).toBe(120);
+    expect(config.browser.loginTimeout).toBe(600);
     expect(config.logging.level).toBe('info');
   });
 

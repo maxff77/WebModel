@@ -19,8 +19,6 @@ export interface BrowserLaunchOptions {
   profileDir: string;
   headless: boolean;
   timeout: number;
-  /** Persisted profile fingerprint; Camoufox uses it instead of generating one. */
-  fingerprint?: unknown;
 }
 
 export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<BrowserContext>;
@@ -28,21 +26,21 @@ export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<Browser
 /** Attach-mode seam, injected in tests instead of dialing a real CDP endpoint. */
 export type CdpConnector = (cdpUrl: string, timeout: number) => Promise<Browser>;
 
-export type BrowserEngine = 'chrome' | 'camoufox';
+export type BrowserEngine = 'chrome' | 'camoufox' | 'cloakbrowser';
 
-/** The manager only needs the identity, engine, data dir, fingerprint and fallback of a profile. */
+/** The manager only needs the identity, engine, data dir and fallback of a profile. */
 export type ActiveProfile = Pick<
   ResolvedProfile,
-  'name' | 'engine' | 'dir' | 'fingerprint' | 'fallbackProfile'
+  'name' | 'engine' | 'dir' | 'fallbackProfile'
 >;
 
 export function isBrowserEngine(value: unknown): value is BrowserEngine {
-  return value === 'chrome' || value === 'camoufox';
+  return value === 'chrome' || value === 'camoufox' || value === 'cloakbrowser';
 }
 
-/** Camoufox is Firefox: there is no CDP to attach to, so it always launches. */
+/** Attach drives the user's own Chrome; every other engine is a browser we launch. */
 export function effectiveMode(engine: BrowserEngine, mode: BrowserMode): BrowserMode {
-  return engine === 'camoufox' ? 'launch' : mode;
+  return engine === 'chrome' ? mode : 'launch';
 }
 
 /**
@@ -107,11 +105,20 @@ async function launchCamoufoxContext(options: BrowserLaunchOptions): Promise<Bro
     );
   }
   try {
+    // No fingerprint argument: Camoufox generates its own BrowserForge
+    // fingerprint per launch, matched to its pinned build. Constrain it to the
+    // host OS so the spoofed platform matches the fonts and hardware around it.
+    const os = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     return await Camoufox({
       user_data_dir: options.profileDir,
       headless: options.headless,
       timeout: options.timeout,
-      fingerprint: options.fingerprint,
+      os,
+      // Camoufox injects uBlock Origin by default. Its lists abort DeepSeek's
+      // device-fingerprint endpoints (gator.volces.com, fp-it-acc.portal101.cn),
+      // which a normal browser lets through. Removing it does not fix the
+      // DeepSeek hCaptcha loop: hCaptcha still answers pass:false.
+      exclude_addons: ['UBO'],
     });
   } catch (err) {
     throw new Error(
@@ -121,9 +128,32 @@ async function launchCamoufoxContext(options: BrowserLaunchOptions): Promise<Bro
   }
 }
 
+async function launchCloakBrowserContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
+  let launchPersistentContext: (opts: Record<string, unknown>) => Promise<BrowserContext>;
+  try {
+    // Optional dependency: only users of this engine need it.
+    ({ launchPersistentContext } = await import('cloakbrowser' as string));
+  } catch (err) {
+    throw new Error(
+      `CloakBrowser is not installed or could not be loaded: ${(err as Error).message}\n` +
+      'Run: npm install cloakbrowser\n' +
+      'Then download the browser binary with: npx cloakbrowser install',
+    );
+  }
+  // The wrapper stores one fingerprint seed per profile in
+  // <profileDir>/.cloakbrowser-seed, so each account keeps its own stable
+  // fingerprint. Unlike Camoufox, it passed DeepSeek's hCaptcha (2026-10-24).
+  return launchPersistentContext({
+    userDataDir: options.profileDir,
+    headless: options.headless,
+    launchOptions: { timeout: options.timeout },
+  });
+}
+
 const defaultLaunchers: Record<BrowserEngine, BrowserLauncher> = {
   chrome: launchChromeContext,
   camoufox: launchCamoufoxContext,
+  cloakbrowser: launchCloakBrowserContext,
 };
 
 async function connectOverCDP(cdpUrl: string, timeout: number): Promise<Browser> {
@@ -412,10 +442,22 @@ export class BrowserManager {
 
       const page: Page = await headedContext.newPage();
 
+      // A window closing is not proof of a successful sign-in: track where the
+      // page ended up so a closed login page is not reported as success.
+      const loginPath = (() => {
+        try { return new URL(loginUrl).pathname; } catch { return null; }
+      })();
+      const verifiable = loginPath !== null && loginPath !== '/';
+      let lastPath = loginPath;
+      page.on('framenavigated', (frame) => {
+        if (frame !== page.mainFrame()) return;
+        try { lastPath = new URL(frame.url()).pathname; } catch { /* keep last */ }
+      });
+
       this._loginState = {
         providerId,
         status: 'waiting_for_user',
-        message: `Chrome window opened. Please log in at ${loginUrl}`,
+        message: `Browser window opened. Please log in at ${loginUrl}`,
         startedAt: Date.now(),
       };
 
@@ -432,8 +474,20 @@ export class BrowserManager {
           headedContext.on('close', () => { clearTimeout(timeout); resolve(); });
         });
 
+        const completed = !verifiable || lastPath !== loginPath;
         await headedContext.close().catch(() => {});
         this.context = null;
+
+        if (!completed) {
+          this._loginState = {
+            providerId,
+            status: 'failed',
+            message: 'Login window closed before sign-in completed. Try again and wait until the site leaves the login page.',
+            startedAt: null,
+          };
+          onComplete(false, loginProfile);
+          return;
+        }
 
         this._loginState = { providerId, status: 'success', message: `Login completed for ${providerId}.`, startedAt: null };
         onComplete(true, loginProfile);
@@ -601,8 +655,8 @@ export class BrowserManager {
   }
 
   private launch(headless: boolean): Promise<BrowserContext> {
-    // The persisted profile can change between launches (a regenerated
-    // fingerprint); re-read the same profile so the next launch uses it.
+    // Re-read the profile so a fallback or manifest change applies on the next
+    // launch instead of sticking to the identity resolved at startup.
     let persisted: ResolvedProfile | undefined;
     try {
       persisted = this.opts.resolveProfile?.(this._profile.name);
@@ -615,7 +669,6 @@ export class BrowserManager {
       profileDir: this._profile.dir,
       headless,
       timeout: this.opts.startupTimeout,
-      fingerprint: this._profile.fingerprint,
     });
   }
 

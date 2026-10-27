@@ -63,7 +63,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<CheckResult[]
       // Version detection failed, but Chrome exists
     }
     results.push({ name: 'Chrome', status: 'ok', message: `Found at ${chromePath}${versionInfo}` });
-  } else if (engine !== 'camoufox') {
+  } else if (engine === 'chrome') {
     results.push({
       name: 'Chrome',
       status: 'fail',
