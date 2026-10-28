@@ -262,6 +262,21 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(calls).toBe(1);
   });
 
+  it('a prompt over the web length cap is a 400 "prompt is too long" asked once, not a retried 502', async () => {
+    let calls = 0;
+    const full = new CapturingProvider('');
+    full.chat = async function* () {
+      calls++;
+      yield { type: 'error', message: 'DeepSeek: Length limit reached. Please start a new chat.', code: 'context_length_exceeded', possiblySent: true };
+    };
+    const res = await post(full, true);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({ type: 'error', error: { type: 'invalid_request_error' } });
+    expect(body.error.message).toMatch(/^prompt is too long: \d+ tokens > 1 maximum$/);
+    expect(calls).toBe(1);
+  });
+
   // The client may give up (Claude Code timeout, user cancel) while its turn waits
   // in the lane. Abandoned work must not reach the shared browser tab.
   it('client already gone: the provider is never asked', async () => {

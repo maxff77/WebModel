@@ -165,6 +165,12 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       if (reply.code === 'account_muted') {
         return c.json({ type: 'error', error: { type: 'permission_error', message: reply.error } }, 403);
       }
+      // Over the web's length cap: a retried 502 re-sends the whole prompt. Same shape as the real API.
+      if (reply.code === 'context_length_exceeded') {
+        const max = (await provider.models()).find(m => m.id === model)?.contextWindow;
+        const message = `prompt is too long: ${estimateTokens(buildWebPrompt(messages, tools))} tokens > ${max} maximum`;
+        return c.json({ type: 'error', error: { type: 'invalid_request_error', message } }, 400);
+      }
       const limited = reply.code === 'upstream_rate_limit';
       return c.json(
         { type: 'error', error: { type: limited ? 'rate_limit_error' : 'api_error', message: reply.error } },

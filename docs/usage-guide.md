@@ -72,7 +72,7 @@ npx web-model-bridge
           {
             "id": "deepseek-web/deepseek-v4",
             "name": "DeepSeek V4 (Free)",
-            "contextWindow": 128000,
+            "contextWindow": 500000,
             "maxTokens": 8192,
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
           },
@@ -136,8 +136,8 @@ Claude Code 会将请求发送到 `http://localhost:3456/v1/messages` → web-mo
 | `claude-web/claude-haiku-4-5`       | Claude Haiku 4.5     | 200K | claude.ai               |
 | `chatgpt-web/gpt-5.3`               | GPT-5.3              | 128K | chatgpt.com             |
 | `chatgpt-web/gpt-5.4-mini`          | GPT-5.4 Mini         | 128K | chatgpt.com             |
-| `deepseek-web/deepseek-v4`          | DeepSeek V4          | 128K | chat.deepseek.com       |
-| `deepseek-web/deepseek-v4-reasoner` | DeepSeek V4 Reasoner | 128K | chat.deepseek.com       |
+| `deepseek-web/deepseek-v4`          | DeepSeek V4          | 500K | chat.deepseek.com       |
+| `deepseek-web/deepseek-v4-reasoner` | DeepSeek V4 Reasoner | 500K | chat.deepseek.com       |
 | `kimi-web/kimi-k2.5`                | Kimi K2.5            | 256K | kimi.moonshot.cn        |
 | `qwen-web/qwen-3.5-plus`            | Qwen 3.5 Plus        | 262K | chat.qwen.ai            |
 | `qwen-web/qwq`                      | QwQ                  | 32K  | chat.qwen.ai            |

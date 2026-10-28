@@ -95,9 +95,13 @@ export class DeepSeekProvider extends BaseProvider {
   }
 
   async models(): Promise<ModelInfo[]> {
+    // V4 takes 1M, but chat.deepseek.com refuses longer prompts (hint finish_reason
+    // context_length_exceeded). Measured 2026-10-28 with code as filler, in estimateTokens units:
+    // 525K answered and recalled codes hidden at its start and middle, 550K was refused.
+    // 500K leaves margin for one large tool result before Claude Code compacts.
     return [
-      { id: 'deepseek-v4', name: 'DeepSeek V4', contextWindow: 128000, maxOutput: 8192 },
-      { id: 'deepseek-v4-reasoner', name: 'DeepSeek V4 Reasoner', contextWindow: 128000, maxOutput: 8192 },
+      { id: 'deepseek-v4', name: 'DeepSeek V4', contextWindow: 500000, maxOutput: 8192 },
+      { id: 'deepseek-v4-reasoner', name: 'DeepSeek V4 Reasoner', contextWindow: 500000, maxOutput: 8192 },
     ];
   }
 
