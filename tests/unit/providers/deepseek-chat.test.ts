@@ -2,6 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { DeepSeekProvider } from '../../../src/providers/deepseek/index.js';
 import { DEEPSEEK_DEVICE_ID_KEY } from '../../../src/providers/deepseek/client.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
+import { AuthStore } from '../../../src/auth/store.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Captured verbatim from chat.deepseek.com on 2026-10-20: the id moved into
 // data.biz_data.chat_session, and API errors arrive as HTTP 200 envelopes.
@@ -36,9 +40,12 @@ function fakePage(replies: unknown[]) {
   return { page, reloads: () => reloads };
 }
 
+// A capture checks and refreshes the login mark; these tests start logged in.
+const loggedIn = { getStatus: () => ({ status: 'active' }), setStatus: () => {} };
+
 function providerWithReplies(replies: unknown[], bearer: string | null = 'test') {
   const { page } = fakePage(replies);
-  const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
+  const provider = new DeepSeekProvider(loggedIn as any, undefined, async () => page as any);
   if (bearer) provider.setBearerToken(bearer);
   return provider;
 }
@@ -182,7 +189,7 @@ describe('DeepSeekProvider session create', () => {
       { data: createReply }, powReply, { data: sse },
     ];
     const { page, reloads } = fakePage(replies);
-    const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
+    const provider = new DeepSeekProvider(loggedIn as any, undefined, async () => page as any);
 
     await events(provider);
     await events(provider);
@@ -196,7 +203,7 @@ describe('DeepSeekProvider session create', () => {
       { data: createReply }, powReply, { data: sse },
     ];
     const { page, reloads } = fakePage(replies);
-    const provider = new DeepSeekProvider({} as any, undefined, async () => page as any);
+    const provider = new DeepSeekProvider(loggedIn as any, undefined, async () => page as any);
 
     expect((await events(provider))[0]).toMatchObject({ type: 'error' });
     expect(await events(provider)).toEqual([
@@ -229,5 +236,37 @@ describe('DeepSeekProvider closed session', () => {
       vi.useRealTimers();
     }
     expect(setStatus).toHaveBeenCalledWith('deepseek-web', 'expired');
+  });
+
+  // 2026-10-29: after a 401 the user logged in again in the bridge's own open window,
+  // not through the dashboard; the route kept answering auth_required from auth.json.
+  it('a login in the open window lifts the expired mark on the next request', async () => {
+    const store = new AuthStore(mkdtempSync(join(tmpdir(), 'wmb-auth-')));
+    store.setStatus('deepseek-web', 'active');
+    let url = 'https://chat.deepseek.com/sign_in';
+    const { page } = fakePage([{ data: createReply }, powReply, { data: 'data: {"p":"response/status","v":"FINISHED"}\n\n' }]);
+    const pageOnSignIn = { ...page, url: () => url, reload: async () => { if (!url.endsWith('/sign_in')) await page.reload(); } };
+    const provider = new DeepSeekProvider(store, undefined, async () => pageOnSignIn as any);
+
+    vi.useFakeTimers();
+    try {
+      const pending = events(provider);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect((await pending)[0]).toMatchObject({ code: 'auth_expired' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(store.getStatus('deepseek-web').status).toBe('expired');
+
+    url = 'https://chat.deepseek.com/';
+    // The route asks this before calling chat(): a closed session must still reach the page.
+    expect(await provider.isAuthenticated()).toBe(true);
+    expect(await events(provider)).toEqual([{ type: 'done', reason: 'stop' }]);
+    expect(store.getStatus('deepseek-web').status).toBe('active');
+  });
+
+  it('a provider never logged in on this profile stays gated', async () => {
+    const provider = new DeepSeekProvider(new AuthStore(mkdtempSync(join(tmpdir(), 'wmb-auth-'))));
+    expect(await provider.isAuthenticated()).toBe(false);
   });
 });

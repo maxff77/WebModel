@@ -86,8 +86,12 @@ export class DeepSeekProvider extends BaseProvider {
     await context.openUrl(this.info.loginUrl);
   }
 
+  /**
+   * 'expired' is only what chat() last saw on the page; the user may have logged
+   * in again in the open window since, so let chat() look instead of gating.
+   */
   async isAuthenticated(): Promise<boolean> {
-    return this.authStore.getStatus(this.info.id).status === 'active';
+    return this.authStore.getStatus(this.info.id).status !== 'none';
   }
 
   async detectLoginComplete(): Promise<boolean> {
@@ -162,7 +166,10 @@ export class DeepSeekProvider extends BaseProvider {
         // Reload the page — DeepSeek frontend will fire API calls with both headers.
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
         bearer = await tokenPromise;
-        if (bearer) this.bearerToken = bearer;
+        if (bearer) {
+          this.bearerToken = bearer;
+          if (this.authStore.getStatus(this.info.id).status !== 'active') this.authStore.setStatus(this.info.id, 'active');
+        }
         const captured = await identityPromise;
         if (captured) {
           clientHeaders = { ...clientHeaders, ...captured };
