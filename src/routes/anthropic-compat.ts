@@ -15,7 +15,7 @@ import {
   streamEventToStopReason,
   type AnthropicContentBlock,
 } from '../core/anthropic-formatter.js';
-import { dsmlShape, parseToolCalls, renderToolCalls } from '../core/tool-protocol.js';
+import { dsmlShape, parseToolCalls, renderToolCalls, renderToolsPrompt } from '../core/tool-protocol.js';
 import { ProviderQueue, requestPacing } from '../core/queue.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AuthExpiredError, AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
@@ -179,16 +179,32 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
     }
 
     let parsed = parseToolCalls(reply.text);
-    if (parsed.malformed) {
-      // DeepSeek garbled 4 of 336 tool-call blocks on 2026-10-18; ask once more rather than end the turn.
-      const garbled = (what: string) => console.warn(
-        `[${provider.info.id}] ${new Date().toISOString()} ${what} (${parsed.calls.length} calls): ${dsmlShape(reply.text)}`);
-      garbled('garbled tool-call block, asking again');
+    let reasked = false;
+    // A garbled block with no complete call is asked once more rather than ending the turn.
+    // With complete calls, those run and the rest is dropped: the model reissues it after the
+    // results, and a re-ask re-sends the whole prompt (4 of 9 garbles had calls, 2026-10-24..27).
+    if (parsed.malformed && !parsed.calls.length) {
+      console.warn(`[${provider.info.id}] ${new Date().toISOString()} garbled tool-call block, asking again: ${dsmlShape(reply.text)}`);
       if (signal.aborted) return disconnected();
       const again = await run();
+      reasked = true;
       if (!failed(again)) { reply = again; parsed = parseToolCalls(again.text); }
-      if (parsed.malformed) garbled('still garbled');
     }
+
+    const prompt = buildWebPrompt(messages, tools);
+    const inputTokens = estimateTokens(prompt);
+    // One line per tool-call reply: the format's error rate (re-asks, lost calls, cuts) and the prompt split.
+    if (parsed.calls.length || parsed.truncated || parsed.malformed) {
+      const outcome = parsed.truncated ? 'truncated' : !parsed.malformed ? 'ok' : parsed.calls.length ? 'partial' : 'garbled';
+      const catalog = tools.length ? estimateTokens(renderToolsPrompt(tools)) : 0;
+      console.log(`[tools] ${new Date().toISOString()} ${provider.info.id} dsml ${outcome} calls=${parsed.calls.length}`
+        + ` reask=${+reasked} catalog=${catalog} history=${inputTokens - catalog}`
+        + (outcome === 'ok' ? '' : ` shape=${dsmlShape(reply.text)}`));
+    }
+
+    // DeepSeek sometimes lowercases tool names (`bash`, `read`). Unknown names pass through:
+    // Claude Code answers "No such tool" and the model corrects itself without another web message.
+    const toolNames = new Map(tools.map(t => [t.function.name.toLowerCase(), t.function.name]));
     const prose = parsed.text + (reply.error ? `\n\nError: ${reply.error}` : '');
     const blocks: AnthropicContentBlock[] = [
       ...(reply.thinking ? [{ type: 'thinking' as const, thinking: reply.thinking, signature: '' }] : []),
@@ -196,7 +212,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       ...parsed.calls.map(call => ({
         type: 'tool_use' as const,
         id: `toolu_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
-        name: call.name,
+        name: toolNames.get(call.name.toLowerCase()) ?? call.name,
         input: call.input,
       })),
     ];
@@ -207,7 +223,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
 
     // What the web model really received and produced, so Claude Code's context meter and auto-compact work.
     const usage = {
-      input_tokens: estimateTokens(buildWebPrompt(messages, tools)),
+      input_tokens: inputTokens,
       output_tokens: estimateTokens(reply.thinking, reply.text),
     };
 

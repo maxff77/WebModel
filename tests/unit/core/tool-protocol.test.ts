@@ -158,6 +158,32 @@ describe('DeepSeek DSML drift seen in real sessions', () => {
     }
   });
 
+  // Shapes from bridge.log, 2026-10-24..27.
+  it('singular `function_call` opener and closer', () => {
+    const text = ['<｜DSML｜function_call>', ...bash('pwd'), '</｜DSML｜function_call>'].join('\n');
+    expect(parseToolCalls(text)).toEqual({ text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }] });
+  });
+
+  it('a closer slash on the next invoke opener', () => {
+    expect(parseToolCalls(reply(...bash('pwd'), close('invoke name="Bash"'), p('command', 'ls'), close('invoke')))).toEqual({
+      text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }, { name: 'Bash', input: { command: 'ls' } }],
+    });
+  });
+
+  it('invoke written as a parameter with a separate name attribute', () => {
+    const text = ['<｜DSML｜function_call>', open('parameter name="invoke" name="Bash"'), p('command', 'pwd'), close('invoke')].join('\n');
+    expect(parseToolCalls(text)).toEqual({ text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }] });
+  });
+
+  // 2026-10-29: logged as truncated; the shape's gaps were exactly 11 and 28 chars.
+  it('invoke and block closers without the DSML prefix', () => {
+    const plain = (command: string) => [open('invoke name="Bash"'), p('command', command), '</invoke>'];
+    const text = ['<｜DSML｜function_calls>', ...plain('pwd'), ...plain('echo "</invoke>"'), '</function_calls>'].join('\n');
+    expect(parseToolCalls(text)).toEqual({
+      text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }, { name: 'Bash', input: { command: 'echo "</invoke>"' } }],
+    });
+  });
+
   it('junk after a good invoke keeps the call and flags the block', () => {
     expect(parseToolCalls(reply(...bash('pwd'), 'junk', ...bash('ls')))).toEqual({
       text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,

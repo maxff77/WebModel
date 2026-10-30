@@ -381,6 +381,27 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(body.content.at(-1)).toMatchObject({ type: 'tool_use', name: 'Bash', input: { command: 'pwd' } });
   });
 
+  it('a garbled block with a complete call runs that call instead of asking again', async () => {
+    const partial = DSML_REPLY.replace('</｜DSML｜function_calls>', 'junk\n<｜DSML｜invoke name="Bash">');
+    const replies = [partial, DSML_REPLY];
+    const provider = new CapturingProvider('');
+    provider.chat = async function* () {
+      yield { type: 'text_delta', delta: replies.shift()! };
+      yield { type: 'done', reason: 'stop' };
+    };
+    const body = await (await post(provider, false)).json();
+    expect(replies).toEqual([DSML_REPLY]);
+    expect(body.stop_reason).toBe('tool_use');
+    expect(body.content.filter((b: any) => b.type === 'tool_use')).toMatchObject([{ name: 'Bash', input: { command: 'pwd' } }]);
+  });
+
+  it('a lowercased tool name is matched to the request tool; an unknown one passes through', async () => {
+    const reply = DSML_REPLY.replace('name="Bash"', 'name="bash"')
+      .replace('</｜DSML｜function_calls>', '<｜DSML｜invoke name="Grep">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>');
+    const body = await (await post(new CapturingProvider(reply), false)).json();
+    expect(body.content.filter((b: any) => b.type === 'tool_use').map((b: any) => b.name)).toEqual(['Bash', 'Grep']);
+  });
+
   it('garbled twice: the block is dropped and max_tokens makes Claude Code continue', async () => {
     const provider = new CapturingProvider(['Voy a mirar.', '<｜DSML｜function_calls>',
       '<｜｜DSML｜｜ parameter name="command" string="true">pwd</｜｜DSML｜｜ parameter>', '</｜｜DSML｜｜ calls>'].join('\n'));

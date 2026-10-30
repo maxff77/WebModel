@@ -12,18 +12,22 @@ export interface ParsedToolCall {
 }
 
 const P = '[｜|]+\\s*DSML\\s*[｜|]+\\s*';
-const CALLS_CLOSE = `</${P}(?:function_)?calls\\s*>`;
-const INVOKE_CLOSE = `</${P}invoke\\s*>`;
+// Singular `function_call` seen from DeepSeek (3 of 9 garbled blocks, 2026-10-24..27).
+const CALLS = '(?:function_)?calls?';
+// Closers may lose the DSML prefix (`</invoke>`, `</function_calls>`, 2026-10-29). Inside a value
+// they still need a parameter closer right before them (RE_VALUE_END), so plain XML text stays a value.
+const CALLS_CLOSE = `</(?:${P})?${CALLS}\\s*>`;
+const INVOKE_CLOSE = `</(?:${P})?invoke\\s*>`;
 // `parameter name="` is optional (`<｜DSML｜file_path" string="true">`) or doubled
 // (`parameter name="parameter name="command"`): both seen from DeepSeek.
 const PARAM_START = `<${P}(?:parameter\\s+name=")*`;
 // Sticky patterns, matched by the scanner at its current position.
-const RE_CALLS_OPEN = new RegExp(`<${P}(?:function_)?calls\\s*>`, 'y');
-// Also DeepSeek's garbled `parameter name="invoke name="Bash">` and
-// `parameter name="invoke" string="true">Bash</｜DSML｜parameter>`. Extra attributes
-// (a `call="n"` copied from the history) are ignored.
+const RE_CALLS_OPEN = new RegExp(`<${P}${CALLS}\\s*>`, 'y');
+// Also DeepSeek's garbled `parameter name="invoke name="Bash">`, `parameter name="invoke" name="Bash">`,
+// `parameter name="invoke" string="true">Bash</｜DSML｜parameter>` and a closer slash on the
+// opener (`</｜DSML｜invoke name="Bash">`). Extra attributes (a `call="n"` copied from the history) are ignored.
 const RE_INVOKE_OPEN = new RegExp(
-  `<${P}(?:parameter\\s+name=")?invoke(?:\\s+name="([^"]+)"(?:\\s+[\\w-]+="[^"]*")*|"(?:\\s+string="(?:true|false)")?\\s*>\\s*([^<"\\s]+)\\s*</${P}parameter)\\s*>`, 'y');
+  `<\\/?${P}(?:parameter\\s+name=")?invoke(?:"?\\s+name="([^"]+)"(?:\\s+[\\w-]+="[^"]*")*|"(?:\\s+string="(?:true|false)")?\\s*>\\s*([^<"\\s]+)\\s*</${P}parameter)\\s*>`, 'y');
 const RE_INVOKE_CLOSE = new RegExp(INVOKE_CLOSE, 'y');
 const RE_CALLS_CLOSE = new RegExp(CALLS_CLOSE, 'y');
 const RE_PARAM_OPEN = new RegExp(`${PARAM_START}([^"<>\\s]+)"(?:\\s+string="(true|false)")?\\s*>`, 'y');
@@ -37,7 +41,7 @@ const RE_VALUE_END = new RegExp(
 const RE_BLOCK_START = new RegExp(`<${P}\\w`, 'g');
 const RE_ANY_CLOSE = new RegExp(`${INVOKE_CLOSE}|${CALLS_CLOSE}`);
 const RE_DSML_OPEN = new RegExp(`<${P}`);
-const RE_REPEATED_CALLS_OPEN = new RegExp(`^\\s*<${P}(?:function_)?calls\\s*>`, 'y');
+const RE_REPEATED_CALLS_OPEN = new RegExp(`^\\s*<${P}${CALLS}\\s*>`, 'y');
 
 function parseJson(v: string): unknown {
   try { return JSON.parse(v); } catch { return v; }
