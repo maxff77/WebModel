@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { loadConfig, writeActiveProfile } from '../../../src/config/loader.js';
+import { loadConfig, writeActiveProfile, writeDeepSeekProfiles } from '../../../src/config/loader.js';
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -102,6 +102,19 @@ server:
     }
   });
 
+  it('deepseek.profiles defaults to none and reads a list from YAML', () => {
+    expect(loadConfig({ stateDir: testDir }).deepseek.profiles).toEqual([]);
+    writeFileSync(join(testDir, 'config.yml'), 'deepseek:\n  profiles: [cuenta1, cuenta2]\n');
+    expect(loadConfig({ stateDir: testDir }).deepseek.profiles).toEqual(['cuenta1', 'cuenta2']);
+  });
+
+  it('rejects deepseek.profiles that is not a list of distinct names', () => {
+    for (const bad of ['profiles: cuenta1', 'profiles: [cuenta1, cuenta1]', 'profiles: [cuenta1, 3]', "profiles: ['']"]) {
+      writeFileSync(join(testDir, 'config.yml'), `deepseek:\n  ${bad}\n`);
+      expect(() => loadConfig({ stateDir: testDir }), bad).toThrow(/deepseek\.profiles/);
+    }
+  });
+
   it('WMB_PROFILE overrides --profile', () => {
     process.env.WMB_PROFILE = 'env-profile';
     try {
@@ -130,6 +143,17 @@ server:
 
     const config = loadConfig({ stateDir: testDir, configFile: configPath });
     expect(config.browser.profile).toBe('work');
+  });
+
+  it('persists the DeepSeek turn without losing other settings', () => {
+    writeFileSync(join(testDir, 'config.yml'), 'providers:\n  fallbackModel: deepseek-web/deepseek-v4\nbrowser:\n  profile: test1\n');
+
+    writeDeepSeekProfiles({ stateDir: testDir, profiles: ['a', 'b'] });
+
+    const config = loadConfig({ stateDir: testDir });
+    expect(config.deepseek.profiles).toEqual(['a', 'b']);
+    expect(config.browser.profile).toBe('test1');
+    expect(config.providers.fallbackModel).toBe('deepseek-web/deepseek-v4');
   });
 
   it('refuses to rewrite a config file it cannot parse', () => {

@@ -3,7 +3,7 @@ import { createTestContext, type TestContext } from '../../helpers/test-server.j
 import { BaseProvider, buildWebPrompt, estimateTokens, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { parseToolCalls } from '../../../src/core/tool-protocol.js';
-import { rateLimitCooldown } from '../../../src/routes/anthropic-compat.js';
+import { rateLimitCooldown, toolFormat } from '../../../src/routes/anthropic-compat.js';
 import { encode } from 'gpt-tokenizer';
 
 // Shape of what DeepSeek Web emits when it decides to call a tool (DSML).
@@ -68,7 +68,7 @@ const claudeCodeBody = (stream: boolean) => ({
 describe('Anthropic route as Claude Code agent backend', () => {
   let ctx: TestContext;
   const pacing = { ...rateLimitCooldown };
-  afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitCooldown, pacing); });
+  afterEach(() => { ctx?.cleanup(); Object.assign(rateLimitCooldown, pacing); toolFormat.mode = 'dsml'; });
 
   async function post(provider: CapturingProvider, stream: boolean, extra: object = {}, path = '/v1/messages') {
     ctx = createTestContext({ providers: [provider as any] });
@@ -222,18 +222,29 @@ describe('Anthropic route as Claude Code agent backend', () => {
     }
   });
 
-  it('persistent rate limit becomes a 429 rate_limit_error once the cooldown budget is spent', async () => {
-    Object.assign(rateLimitCooldown, { firstWaitMs: 10, maxWaitMs: 25 });
+  // 2026-10-29: each request was held up to 180 s and Claude Code retries a 429 ~10 times,
+  // so a session sat on "API error" for ~30 min before showing DeepSeek's reason.
+  it('a rate limit is a 429 at once with DeepSeek\'s message; during the cooldown without asking again', async () => {
+    const message = 'DeepSeek: Mensajes muy frecuentes. Intenta de nuevo más tarde.';
     let calls = 0;
     const limited = new CapturingProvider('');
     limited.chat = async function* () {
       calls++;
-      yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
+      yield { type: 'error', message, code: 'upstream_rate_limit' };
     };
-    const res = await post(limited, true);
-    expect(res.status).toBe(429);
-    expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'rate_limit_error' } });
-    expect(calls).toBe(2);
+    ctx = createTestContext({ providers: [limited as any] });
+    const started = performance.now();
+    for (let i = 0; i < 2; i++) {
+      const res = await ctx.app.request('/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(claudeCodeBody(true)),
+      });
+      expect(res.status).toBe(429);
+      expect(await res.json()).toMatchObject({ type: 'error', error: { type: 'rate_limit_error', message } });
+    }
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(calls).toBe(1);
   });
 
   it('a closed provider session is a 401 asked once, not a "temporary" 502 retried', async () => {
@@ -294,8 +305,10 @@ describe('Anthropic route as Claude Code agent backend', () => {
     expect(provider.last).toBeNull();
   });
 
-  it('client leaves during a rate-limit cooldown: the 5 s wait is cut and no retry is sent', async () => {
-    Object.assign(rateLimitCooldown, { firstWaitMs: 5_000, maxWaitMs: 60_000 });
+  // 2026-10-24: Claude Code re-sent each 429 at once and every request restarted the
+  // cooldown at 5 s, so a ~10 min lockout took 20 probes.
+  it('after the cooldown the next request asks again, and another refusal doubles it', async () => {
+    Object.assign(rateLimitCooldown, { firstWaitMs: 50 });
     let calls = 0;
     const limited = new CapturingProvider('');
     limited.chat = async function* () {
@@ -303,66 +316,22 @@ describe('Anthropic route as Claude Code agent backend', () => {
       yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
     };
     ctx = createTestContext({ providers: [limited as any] });
-    const gone = new AbortController();
-    const pending = ctx.app.request('/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(claudeCodeBody(false)),
-      signal: gone.signal,
-    });
-    setTimeout(() => gone.abort(), 20);
-    const started = performance.now();
-    const res = await pending;
-    expect(performance.now() - started).toBeLessThan(2_000);
-    expect(res.status).toBe(499);
-    expect(calls).toBe(1);
-  });
-
-  it('rate limit holds the provider lane and retries after a cooldown, so parallel subagents all succeed', async () => {
-    Object.assign(rateLimitCooldown, { firstWaitMs: 30, maxWaitMs: 1_000 });
-    const starts: number[] = [];
-    const deepseek = new CapturingProvider('ok');
-    deepseek.chat = async function* () {
-      starts.push(performance.now());
-      if (starts.length <= 2) { yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' }; return; }
-      yield { type: 'text_delta', delta: 'ok' };
-      yield { type: 'done', reason: 'stop' };
-    };
-    ctx = createTestContext({ providers: [deepseek as any] });
     const req = () => ctx.app.request('/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(claudeCodeBody(false)),
     });
-    const results = await Promise.all([req(), req(), req()]);
-    expect(results.map(r => r.status)).toEqual([200, 200, 200]);
-    expect(starts).toHaveLength(5);
-    // No request reached the provider during a cooldown (30 ms, then 60 ms).
-    expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(25);
-    expect(starts[2] - starts[1]).toBeGreaterThanOrEqual(55);
-  });
-
-  // 2026-10-24: Claude Code re-sent each 429 at once and every request restarted the
-  // cooldown at 5 s, so a ~10 min lockout took 20 probes.
-  it('the cooldown carries over to the next request instead of probing again at once', async () => {
-    Object.assign(rateLimitCooldown, { firstWaitMs: 20, maxWaitMs: 100 });
-    const starts: number[] = [];
-    const limited = new CapturingProvider('');
-    limited.chat = async function* () {
-      starts.push(performance.now());
-      yield { type: 'error', message: 'DeepSeek: Messages too frequent.', code: 'upstream_rate_limit' };
-    };
-    ctx = createTestContext({ providers: [limited as any] });
-    const req = () => ctx.app.request('/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(claudeCodeBody(false)),
-    });
+    const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
     expect((await req()).status).toBe(429);
-    const probes = starts.length;
+    await pause(60);
     expect((await req()).status).toBe(429);
-    // Probes at 0, 20, 60 ms; the next one waits out the doubled 80 ms cooldown.
-    expect(starts[probes] - starts[probes - 1]).toBeGreaterThanOrEqual(70);
+    expect(calls).toBe(2);
+    await pause(60); // inside the doubled 100 ms cooldown
+    expect((await req()).status).toBe(429);
+    expect(calls).toBe(2);
+    await pause(50);
+    expect((await req()).status).toBe(429);
+    expect(calls).toBe(3);
   });
 
   it('a garbled tool-call block is asked again instead of ending the turn', async () => {
@@ -400,6 +369,17 @@ describe('Anthropic route as Claude Code agent backend', () => {
       .replace('</｜DSML｜function_calls>', '<｜DSML｜invoke name="Grep">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>');
     const body = await (await post(new CapturingProvider(reply), false)).json();
     expect(body.content.filter((b: any) => b.type === 'tool_use').map((b: any) => b.name)).toEqual(['Bash', 'Grep']);
+  });
+
+  it('lines format: prompt and history use markers, and a lines reply becomes a tool_use', async () => {
+    toolFormat.mode = 'lines';
+    const provider = new CapturingProvider('Voy.\n[[call Bash]]\n[[command]]\npwd\n[[end]]');
+    const body = await (await post(provider, false)).json();
+    const prompt = buildWebPrompt(provider.last!.messages, provider.last!.tools, provider.last!.toolFormat);
+    expect(prompt).toContain('[[call Bash #1]]\n[[command]]\nls\n[[end]]');
+    expect(prompt).not.toContain('DSML');
+    expect(body.stop_reason).toBe('tool_use');
+    expect(body.content.at(-1)).toMatchObject({ type: 'tool_use', name: 'Bash', input: { command: 'pwd' } });
   });
 
   it('garbled twice: the block is dropped and max_tokens makes Claude Code continue', async () => {

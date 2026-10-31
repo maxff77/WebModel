@@ -60,7 +60,7 @@ export class DoubaoProvider extends BaseProvider {
         return;
       }
 
-      const prompt = buildWebPrompt(req.messages, req.tools);
+      const prompt = buildWebPrompt(req.messages, req.tools, req.toolFormat);
 
       possiblySent = true;
       const sseResult = await page.evaluate(async (args: {

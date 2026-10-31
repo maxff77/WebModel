@@ -46,6 +46,12 @@ export class AuthStore {
     this.data = this.load(profile);
   }
 
+  /** Re-read the file: another store (the dashboard login) may have written it. */
+  reload(): void {
+    this.profile = this.activeProfile();
+    this.data = this.load(this.profile);
+  }
+
   getStatus(providerId: string): ProviderAuthStatus {
     this.sync();
     const entry = this.data[providerId];

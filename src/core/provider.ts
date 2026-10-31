@@ -1,5 +1,5 @@
 import type { StreamEvent } from './stream.js';
-import { renderToolsPrompt } from './tool-protocol.js';
+import { renderToolsPrompt, type ToolFormat } from './tool-protocol.js';
 
 export interface ProviderInfo {
   id: string;
@@ -38,6 +38,8 @@ export interface ChatRequest {
   tools?: ToolDef[];
   /** Client asked for extended thinking (Anthropic `thinking` enabled/adaptive). */
   thinking?: boolean;
+  /** Tool-call text format for the transcript (agent clients only). */
+  toolFormat?: ToolFormat;
   signal?: AbortSignal;
 }
 
@@ -46,6 +48,10 @@ export abstract class BaseProvider {
 
   abstract login(context: { openUrl: (url: string) => Promise<void> }): Promise<void>;
   abstract isAuthenticated(): Promise<boolean>;
+  /** The active profile's login, which the dashboard's Login button shows. A pool serves with any account. */
+  isLoggedInHere(): Promise<boolean> {
+    return this.isAuthenticated();
+  }
   abstract detectLoginComplete(): Promise<boolean>;
   abstract models(): Promise<ModelInfo[]>;
   abstract chat(req: ChatRequest): AsyncIterable<StreamEvent>;
@@ -90,10 +96,10 @@ export function extractText(content: string | unknown): string {
  * 3. Keep assistant messages for multi-turn context
  * 4. Return a clean prompt string
  */
-export function buildWebPrompt(messages: Message[], tools?: ToolDef[]): string {
+export function buildWebPrompt(messages: Message[], tools?: ToolDef[], format?: ToolFormat): string {
   // Agent clients (Anthropic route, e.g. Claude Code) always pass `tools`, maybe empty.
   // Every web request opens a fresh chat, so they need the whole transcript.
-  if (tools) return buildTranscript(messages, tools);
+  if (tools) return buildTranscript(messages, tools, format);
 
   const parts: string[] = [];
 
@@ -120,7 +126,7 @@ export function buildWebPrompt(messages: Message[], tools?: ToolDef[]): string {
   return parts.length > 0 ? parts[parts.length - 1] : '';
 }
 
-function buildTranscript(messages: Message[], tools: ToolDef[]): string {
+function buildTranscript(messages: Message[], tools: ToolDef[], format?: ToolFormat): string {
   // Leading system messages form the header; later ones (Claude Code sends hook
   // output and MCP instructions mid-conversation) stay where they were sent.
   const firstTurn = messages.findIndex(m => m.role !== 'system');
@@ -129,7 +135,7 @@ function buildTranscript(messages: Message[], tools: ToolDef[]): string {
   const system = header.map(m => extractText(m.content)).filter(Boolean).join('\n\n');
   const parts: string[] = [];
   if (system) parts.push(`<system>\n${system}\n</system>`);
-  if (tools.length) parts.push(renderToolsPrompt(tools));
+  if (tools.length) parts.push(renderToolsPrompt(tools, format));
   parts.push('# Conversation');
   for (const msg of turns) {
     const text = extractText(msg.content);

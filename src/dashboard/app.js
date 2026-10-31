@@ -186,7 +186,9 @@ async function loadProfiles() {
       return;
     }
     var data = await res.json();
-    countEl.textContent = data.profiles.length + ' profiles · ' + data.active + ' active';
+    var pool = data.deepseekPool || [];
+    countEl.textContent = data.profiles.length + ' profiles · ' + data.active + ' active'
+      + (pool.length ? ' · DeepSeek turn: ' + pool.join(', ') : '');
     list.textContent = '';
 
     if (data.profiles.length === 0) {
@@ -218,6 +220,22 @@ async function loadProfiles() {
 
       var right = document.createElement('div');
       right.className = 'provider-right';
+
+      // Ticked profiles take DeepSeek calls in turn; none ticked = the active profile only.
+      var turn = document.createElement('label');
+      turn.className = 'pool-toggle';
+      var box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = pool.indexOf(p.name) !== -1;
+      box.addEventListener('change', function () {
+        var names = pool.filter(function (n) { return n !== p.name; });
+        if (box.checked) names.push(p.name);
+        setDeepSeekPool(names);
+      });
+      turn.appendChild(box);
+      turn.appendChild(document.createTextNode('DeepSeek turn'));
+      right.appendChild(turn);
+
       if (p.name === data.active) {
         var badge = document.createElement('span');
         badge.className = 'badge';
@@ -299,6 +317,25 @@ async function activateProfile(name) {
   } catch (err) {
     showToast('Could not switch profiles: ' + err.message);
   }
+}
+
+async function setDeepSeekPool(names) {
+  try {
+    var res = await fetch('/webmodel/profiles/deepseek-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names: names }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast(data.message || 'Could not change the DeepSeek turn');
+    } else {
+      showToast(data.deepseekPool.length ? 'DeepSeek turn: ' + data.deepseekPool.join(', ') : 'DeepSeek uses the active profile only');
+    }
+  } catch (err) {
+    showToast('Could not change the DeepSeek turn: ' + err.message);
+  }
+  loadProfiles();
 }
 
 async function deleteProfile(name) {

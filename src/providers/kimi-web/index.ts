@@ -57,7 +57,7 @@ export class KimiProvider extends BaseProvider {
         return;
       }
 
-      const prompt = buildWebPrompt(req.messages, req.tools);
+      const prompt = buildWebPrompt(req.messages, req.tools, req.toolFormat);
 
       // Kimi uses Connect RPC protocol with binary framing
       possiblySent = true;

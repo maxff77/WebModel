@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { dsmlShape, parseToolCalls, renderToolCalls } from '../../../src/core/tool-protocol.js';
+import { dsmlShape, parseReply, parseToolCalls, renderToolCalls, renderToolsPrompt } from '../../../src/core/tool-protocol.js';
+import type { ToolDef } from '../../../src/core/provider.js';
 
 const block = (...lines: string[]) => ['<｜DSML｜function_calls>', ...lines, '</｜DSML｜function_calls>'].join('\n');
 const invoke = (name: string, ...params: string[]) => [`<｜DSML｜invoke name="${name}">`, ...params, '</｜DSML｜invoke>'].join('\n');
@@ -184,10 +185,88 @@ describe('DeepSeek DSML drift seen in real sessions', () => {
     });
   });
 
+  // 2026-10-29..30: 9 of 26 logged failures.
+  it('a calls opener repeated between invokes and a doubled invoke closer', () => {
+    const text = reply(...bash('pwd'), open('function_calls'), ...bash('ls'), close('invoke'), ...bash('id'));
+    expect(parseToolCalls(text)).toEqual({
+      text: '', calls: ['pwd', 'ls', 'id'].map(command => ({ name: 'Bash', input: { command } })),
+    });
+  });
+
+  it('a parameter name followed by "string"', () => {
+    const text = block(invoke('ToolSearch',
+      '<｜DSML｜query"string">select:Read</｜DSML｜parameter>',
+      '<｜DSML｜content"string" string="true">x</｜DSML｜parameter>'));
+    expect(parseToolCalls(text).calls).toEqual([{ name: 'ToolSearch', input: { query: 'select:Read', content: 'x' } }]);
+  });
+
   it('junk after a good invoke keeps the call and flags the block', () => {
     expect(parseToolCalls(reply(...bash('pwd'), 'junk', ...bash('ls')))).toEqual({
       text: '', calls: [{ name: 'Bash', input: { command: 'pwd' } }], malformed: true,
     });
+  });
+});
+
+describe('lines format', () => {
+  const tool = (name: string, props: Record<string, string>): ToolDef => ({
+    type: 'function',
+    function: { name, description: '', parameters: { type: 'object', properties: Object.fromEntries(Object.entries(props).map(([k, type]) => [k, { type }])) } },
+  });
+  const tools = [tool('Write', { file_path: 'string', content: 'string' }), tool('Read', { file_path: 'string', limit: 'number' })];
+
+  it('round-trips values holding markers, DSML, fences, blank lines and a trailing newline', () => {
+    const calls = [
+      { name: 'Write', input: { file_path: '/a.md', content: '# T\n\n[[content]]\n[[file_path]]\n<｜DSML｜invoke name="X">\n```\n[[call Read]] inline\nend\n' } },
+      { name: 'Read', input: { file_path: '/b.ts', limit: 50 } },
+    ];
+    expect(parseReply(`Writing.\n${renderToolCalls(calls, 'lines')}`, 'lines', tools)).toEqual({ text: 'Writing.', calls });
+  });
+
+  it('types come from the schema: a number param is JSON, a string param stays raw', () => {
+    expect(parseReply('[[call Read #3]]\n[[file_path]]\n123\n[[limit]]\n50\n[[end]]', 'lines', tools).calls)
+      .toEqual([{ name: 'Read', input: { file_path: '123', limit: 50 } }]);
+  });
+
+  it('a block without [[end]] is truncated', () => {
+    expect(parseReply('Ok.\n[[call Read]]\n[[file_path]]\n/a', 'lines', tools)).toEqual({ text: 'Ok.', calls: [], truncated: true });
+  });
+
+  it('a call in a code fence is an example, not a call', () => {
+    const text = 'Format:\n```\n[[call Read]]\n[[file_path]]\n/a\n[[end]]\n```';
+    expect(parseReply(text, 'lines', tools)).toEqual({ text, calls: [] });
+  });
+
+  it('an unknown tool takes any parameter; text before the first parameter flags the block', () => {
+    expect(parseReply('[[call Grep]]\n[[pattern]]\nfoo\n[[end]]', 'lines', tools).calls).toEqual([{ name: 'Grep', input: { pattern: 'foo' } }]);
+    expect(parseReply('[[call Read]]\noops\n[[file_path]]\n/a\n[[end]]', 'lines', tools))
+      .toEqual({ text: '', calls: [{ name: 'Read', input: { file_path: '/a' } }], malformed: true });
+  });
+
+  // 2026-10-31: a subagent got `[[Bash]]` … `[[end]]` (no `call`, no param marker) as plain text,
+  // and no `[tools]` line counted it.
+  it('markers without a [[call]] opener flag the block instead of passing it on as prose', () => {
+    const withBash = [...tools, tool('Bash', { command: 'string', description: 'string' })];
+    const text = 'Mapping files.\n\n[[Bash]]\nfind app -name "*.py" | head -100\n[[end]]\n[[Bash]]\nls app/core/\n[[end]]';
+    expect(parseReply(text, 'lines', withBash)).toEqual({ text: 'Mapping files.', calls: [], malformed: true });
+    expect(parseReply('Ok.\n[[read]]\n/a', 'lines', withBash)).toEqual({ text: 'Ok.', calls: [], malformed: true });
+    const fenced = 'Example:\n```\n[[Bash]]\nls\n[[end]]\n```';
+    expect(parseReply(fenced, 'lines', withBash)).toEqual({ text: fenced, calls: [] });
+  });
+
+  it('a DSML reply to a lines prompt still parses, flagged as a slip', () => {
+    expect(parseReply(renderToolCalls([{ name: 'Read', input: { file_path: '/a' } }]), 'lines', tools))
+      .toEqual({ text: '', calls: [{ name: 'Read', input: { file_path: '/a' } }], slip: true });
+  });
+
+  it('the prompt teaches markers, and past calls carry #n', () => {
+    const prompt = renderToolsPrompt(tools, 'lines');
+    expect(prompt).toContain('[[call TOOL_NAME]]\n[[string_param]]\nplain text\n[[other_param]]\n{"any":"json"}\n[[end]]');
+    expect(prompt).not.toContain('DSML');
+    expect(renderToolCalls([{ name: 'Read', input: { file_path: '/a' }, call: 4 }], 'lines')).toBe('[[call Read #4]]\n[[file_path]]\n/a\n[[end]]');
+  });
+
+  it('logged shape keeps markers and hides values', () => {
+    expect(dsmlShape('Hi\n[[call Read #2]]\n[[file_path]]\n/secret\n[[end]]')).toBe('«3»[[call Read #2]]«1»[[file_path]]«9»[[end]]');
   });
 });
 

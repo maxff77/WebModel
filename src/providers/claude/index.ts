@@ -125,7 +125,7 @@ export class ClaudeProvider extends BaseProvider {
       const conversationId = convResult.conv?.uuid ?? convUuid;
 
       // Step 3: Build prompt from messages
-      const prompt = buildWebPrompt(req.messages, req.tools);
+      const prompt = buildWebPrompt(req.messages, req.tools, req.toolFormat);
 
       // Step 4: Send message and read SSE response
       possiblySent = true;

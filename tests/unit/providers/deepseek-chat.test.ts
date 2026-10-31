@@ -93,7 +93,7 @@ describe('DeepSeekProvider.chat SSE handling', () => {
     // Captured verbatim from chat.deepseek.com on 2026-10-24.
     const body = '{"code":0,"msg":"","data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,"mute_until":1793126295.46}}}';
     expect(await events(providerWithSse(body))).toEqual([
-      { type: 'error', message: 'DeepSeek: account muted until 2026-10-27T18:38:15.460Z', code: 'account_muted', possiblySent: true },
+      { type: 'error', message: 'DeepSeek: account muted until 2026-10-27T18:38:15.460Z', code: 'account_muted', until: 1793126295460, possiblySent: true },
     ]);
   });
 

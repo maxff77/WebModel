@@ -8,6 +8,7 @@ import type { ProfilesApi } from '../../../src/routes/management.js';
 function profileApi(stateDir: string): ProfilesApi {
   const store = new ProfileStore(stateDir);
   let active = DEFAULT_PROFILE;
+  let pool: string[] = [];
   return {
     list: () => store.list(),
     active: () => active,
@@ -18,6 +19,11 @@ function profileApi(stateDir: string): ProfilesApi {
       return profile;
     },
     delete: async (name) => store.delete(name),
+    deepseekPool: () => pool,
+    setDeepSeekPool: async (names) => {
+      names.forEach(n => store.resolve(n));
+      return (pool = names);
+    },
   };
 }
 
@@ -96,6 +102,7 @@ describe('Management endpoints', () => {
       expect(await res.json()).toEqual({
         active: 'default',
         profiles: [{ name: 'work', engine: 'chrome', createdAt: expect.any(String) }],
+        deepseekPool: [],
       });
     });
 
@@ -190,6 +197,28 @@ describe('Management endpoints', () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).message).toMatch(/profile in use/);
+    });
+
+    it('sets the DeepSeek turn and lists it', async () => {
+      ctx = createTestContext({ profiles: profileApi });
+      await ctx.app.request('/webmodel/profiles', json({ name: 'a', engine: 'chrome' }));
+      await ctx.app.request('/webmodel/profiles', json({ name: 'b', engine: 'chrome' }));
+
+      const res = await ctx.app.request('/webmodel/profiles/deepseek-pool', json({ names: ['a', 'b'] }));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ deepseekPool: ['a', 'b'] });
+      expect((await (await ctx.app.request('/webmodel/profiles')).json()).deepseekPool).toEqual(['a', 'b']);
+    });
+
+    it('refuses a DeepSeek turn that is not a list of distinct names, or names a missing profile', async () => {
+      ctx = createTestContext({ profiles: profileApi });
+      await ctx.app.request('/webmodel/profiles', json({ name: 'a', engine: 'chrome' }));
+
+      for (const names of ['a', ['a', 'a'], [1], ['']]) {
+        expect((await ctx.app.request('/webmodel/profiles/deepseek-pool', json({ names }))).status).toBe(400);
+      }
+      expect((await ctx.app.request('/webmodel/profiles/deepseek-pool', json({ names: ['ghost'] }))).status).toBe(404);
     });
 
     it('returns 503 when profiles are not wired', async () => {

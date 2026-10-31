@@ -67,7 +67,7 @@ export class ProviderRegistry {
     const result: ProviderStatus[] = [];
 
     for (const [, provider] of this.providers) {
-      const authenticated = await provider.isAuthenticated();
+      const authenticated = await provider.isLoggedInHere();
       let modelCount = 0;
       if (authenticated) {
         modelCount = (await provider.models()).length;

@@ -25,6 +25,10 @@ export interface BridgeConfig {
     mode: 'attach' | 'launch';
     cdpUrl: string;
   };
+  deepseek: {
+    /** Profiles whose DeepSeek accounts take calls in turn; empty = the active profile only. */
+    profiles: string[];
+  };
   providers: {
     enabled: string[];
     /** Serves requests for a model no provider has; null answers them 400 invalid_model. */
@@ -58,6 +62,9 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       headless: true,
       mode: 'attach',
       cdpUrl: 'http://127.0.0.1:9222',
+    },
+    deepseek: {
+      profiles: [],
     },
     providers: {
       enabled: [
@@ -115,6 +122,11 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
     config.logging.file = join(opts.stateDir, 'logs', 'bridge.log');
   }
 
+  const pool: unknown[] = Array.isArray(config.deepseek.profiles) ? config.deepseek.profiles : [null];
+  if (pool.some(n => typeof n !== 'string' || !n) || new Set(pool).size !== pool.length) {
+    throw new Error('deepseek.profiles must be a list of distinct profile names.');
+  }
+
   // An invalid engine in YAML falls back to chrome. A bad CLI/env override is ignored.
   config.browser.engine = asEngine(config.browser.engine) ?? 'chrome';
 
@@ -145,8 +157,8 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   return config;
 }
 
-/** Persist the active profile, keeping every other setting in the YAML file. */
-export function writeActiveProfile(opts: { stateDir: string; configFile?: string; profile: string }): void {
+/** Rewrite the YAML config through `mutate`, keeping every setting it does not touch. */
+function editConfig(opts: { stateDir: string; configFile?: string }, mutate: (doc: Record<string, unknown>) => void): void {
   const configPath = opts.configFile ?? join(opts.stateDir, 'config.yml');
   let doc: Record<string, unknown> = {};
   if (existsSync(configPath)) {
@@ -165,13 +177,26 @@ export function writeActiveProfile(opts: { stateDir: string; configFile?: string
       doc = parsed as Record<string, unknown>;
     }
   }
-  const browser = doc.browser && typeof doc.browser === 'object' && !Array.isArray(doc.browser)
-    ? doc.browser as Record<string, unknown>
-    : {};
-  browser.profile = opts.profile;
-  doc.browser = browser;
+  mutate(doc);
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, yaml.dump(doc, { lineWidth: 120 }));
+}
+
+function section(doc: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = doc[key];
+  const obj = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  doc[key] = obj;
+  return obj;
+}
+
+/** Persist the active profile, keeping every other setting in the YAML file. */
+export function writeActiveProfile(opts: { stateDir: string; configFile?: string; profile: string }): void {
+  editConfig(opts, (doc) => { section(doc, 'browser').profile = opts.profile; });
+}
+
+/** Persist the DeepSeek accounts in turn, keeping every other setting in the YAML file. */
+export function writeDeepSeekProfiles(opts: { stateDir: string; configFile?: string; profiles: string[] }): void {
+  editConfig(opts, (doc) => { section(doc, 'deepseek').profiles = opts.profiles; });
 }
 
 function mergeDeep(target: Record<string, unknown>, source: Record<string, unknown>): void {

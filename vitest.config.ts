@@ -5,6 +5,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // The bridge defaults to an A/B of tool-call formats; tests pin one so prompts are stable.
+    env: { WMB_TOOL_FORMAT: 'dsml' },
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],

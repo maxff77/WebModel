@@ -70,7 +70,7 @@ export class GLMProvider extends BaseProvider {
         return;
       }
 
-      const prompt = buildWebPrompt(req.messages, req.tools);
+      const prompt = buildWebPrompt(req.messages, req.tools, req.toolFormat);
 
       const assistantId = ASSISTANT_MAP[req.model] || ASSISTANT_MAP['glm-5'];
       const timestamp = String(Date.now());

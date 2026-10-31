@@ -67,7 +67,7 @@ export function openaiRoutes(registry: ProviderRegistry, queue = new ProviderQue
               await s.write(`data: ${JSON.stringify(chunk)}\n\n`);
               isFirst = false;
             }
-          }, c.req.raw.signal);
+          });
           await s.write(`data: ${formatDoneChunk()}\n\n`);
         } catch (err) {
           const errEvent: StreamEvent = {
@@ -92,7 +92,7 @@ export function openaiRoutes(registry: ProviderRegistry, queue = new ProviderQue
           lastError = event.message;
         }
       }
-    }, c.req.raw.signal);
+    });
     if (fullContent.length === 0 && lastError) {
       return c.json({
         error: { message: lastError, type: 'provider_error', code: 'provider_error' },

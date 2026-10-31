@@ -2,7 +2,6 @@ import { createApp } from '../../src/server.js';
 import { ProviderRegistry } from '../../src/core/registry.js';
 import { AuthStore } from '../../src/auth/store.js';
 import { MockProvider } from './mock-provider.js';
-import { requestPacing } from '../../src/core/queue.js';
 import type { BrowserEngine } from '../../src/browser/manager.js';
 import type { ProfilesApi } from '../../src/routes/management.js';
 import { mkdirSync, rmSync } from 'node:fs';
@@ -25,11 +24,6 @@ export function createTestContext(opts?: {
   /** Built from the context's temp stateDir, so tests can use a real ProfileStore. */
   profiles?: (stateDir: string) => ProfilesApi;
 }): TestContext {
-  // Route tests exercise behaviour, not real pacing; the 1s gap would only slow them.
-  requestPacing.minGapMs = 0;
-  requestPacing.maxPerWindow = undefined;
-  requestPacing.maxPerLongWindow = undefined;
-
   const stateDir = join(tmpdir(), `wmb-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(stateDir, { recursive: true });
 

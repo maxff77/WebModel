@@ -52,7 +52,7 @@ export class GeminiProvider extends BaseProvider {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: req.model,
-          messages: [{ role: 'user', content: buildWebPrompt(req.messages, req.tools) }],
+          messages: [{ role: 'user', content: buildWebPrompt(req.messages, req.tools, req.toolFormat) }],
           stream: true,
         }),
       }),

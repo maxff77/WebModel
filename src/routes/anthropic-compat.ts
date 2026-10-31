@@ -15,18 +15,24 @@ import {
   streamEventToStopReason,
   type AnthropicContentBlock,
 } from '../core/anthropic-formatter.js';
-import { dsmlShape, parseToolCalls, renderToolCalls, renderToolsPrompt } from '../core/tool-protocol.js';
-import { ProviderQueue, requestPacing } from '../core/queue.js';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { dsmlShape, parseReply, renderToolCalls, renderToolsPrompt, type ToolFormat } from '../core/tool-protocol.js';
+import { ProviderQueue } from '../core/queue.js';
 import { AuthExpiredError, AuthRequiredError, InvalidBodyError, errorToHttpResponse } from '../core/errors.js';
 import { buildWebPrompt, estimateTokens, type Message, type ToolDef } from '../core/provider.js';
 
 /**
  * Cooldown when the provider answers "too frequent"; exported for tests.
- * maxWaitMs bounds one request's hold; capMs bounds the gap between probes
- * (a lockout on 2026-10-24 lasted ~10 min).
+ * Doubles per refusal up to capMs (a lockout on 2026-10-24 lasted ~10 min).
  */
-export const rateLimitCooldown = { firstWaitMs: 5_000, maxWaitMs: 180_000, capMs: 600_000 };
+export const rateLimitCooldown = { firstWaitMs: 5_000, capMs: 600_000 };
+
+/**
+ * Tool-call text format (`WMB_TOOL_FORMAT`). `ab` picks dsml or lines per request: the history is
+ * re-rendered each time, so a session can switch freely. Exported for tests.
+ * ponytail: drop `ab` and the losing format once one wins (>=200 tool-call replies each).
+ */
+const envFormat = process.env.WMB_TOOL_FORMAT;
+export const toolFormat: { mode: ToolFormat | 'ab' } = { mode: envFormat === 'dsml' || envFormat === 'lines' ? envFormat : 'ab' };
 
 /** One provider call and what the route needs to decide whether to retry it. */
 interface AttemptResult {
@@ -38,11 +44,11 @@ interface AttemptResult {
   possiblySent: boolean;
 }
 
-export function anthropicRoutes(registry: ProviderRegistry, queue = new ProviderQueue(requestPacing)): Hono {
+export function anthropicRoutes(registry: ProviderRegistry, queue = new ProviderQueue()): Hono {
   const app = new Hono();
   // Per provider, across requests: Claude Code re-sends a 429 at once, and a
   // per-request cooldown restarted at 5 s each time, probing all through a lockout.
-  const cooldowns = new Map<string, { until: number; wait: number }>();
+  const cooldowns = new Map<string, { until: number; wait: number; message: string }>();
 
   app.post('/v1/messages', async (c) => {
     let body: any;
@@ -79,7 +85,8 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       return c.json(res.body, res.status as any);
     }
 
-    const { messages, tools } = toChatInput(body);
+    const format: ToolFormat = toolFormat.mode === 'ab' ? (Math.random() < 0.5 ? 'dsml' : 'lines') : toolFormat.mode;
+    const { messages, tools } = toChatInput(body, format);
     // Claude Code asks for extended thinking per request; web providers have it as a mode.
     const wantThinking = ['enabled', 'adaptive'].includes(body.thinking?.type);
 
@@ -97,7 +104,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       };
       if (signal.aborted) return { ...reply, error: 'client disconnected', code: 'aborted' };
       try {
-        for await (const event of provider.chat({ model, messages, tools, thinking: wantThinking, stream: body.stream === true, signal })) {
+        for await (const event of provider.chat({ model, messages, tools, toolFormat: format, thinking: wantThinking, stream: body.stream === true, signal })) {
           if (event.type === 'text_delta') reply.text += event.delta;
           else if (event.type === 'thinking_delta') reply.thinking += event.delta;
           else if (event.type === 'error') {
@@ -114,40 +121,28 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
 
     const failed = (r: Awaited<ReturnType<typeof attempt>>) => r.error && !r.text && !r.thinking;
 
-    // DeepSeek answers "Messages too frequent" when messages come too close together.
-    // Waiting inside the lane also holds back every queued request (other subagents);
-    // a 429 at once let each agent retry on its own and hit the limit again.
-    async function paced() {
+    // DeepSeek answers "Messages too frequent" (in the page's language). That is a 429 at once:
+    // Claude Code shows the message and retries on its own backoff, and while the cooldown
+    // runs those retries are answered here without asking DeepSeek again.
+    async function paced(): Promise<AttemptResult> {
       const id = provider.info.id;
-      const coolingDown: AttemptResult = {
-        text: '', thinking: '', error: `${id}: still cooling down after "too frequent"`,
-        code: 'upstream_rate_limit', stopReason: 'end_turn', possiblySent: false,
-      };
-      let r: AttemptResult | undefined;
-      for (let waited = 0; ; ) {
-        const cd = cooldowns.get(id);
-        const ms = cd ? cd.until - Date.now() : 0;
-        if (ms > 0) {
-          // Hold the request up to its budget, then 429 without probing.
-          const nap = Math.min(ms, rateLimitCooldown.maxWaitMs - waited);
-          // Abort cuts the cooldown so the lane is released to the next request.
-          try { await sleep(nap, undefined, { signal }); } catch { return r ?? coolingDown; }
-          waited += nap;
-          if (nap < ms) return r ?? coolingDown;
-        }
-        r = await attempt();
-        if (signal.aborted) return r;
-        if (!(failed(r) && r.code === 'upstream_rate_limit')) { cooldowns.delete(id); return r; }
-        const wait = Math.min(cd ? cd.wait * 2 : rateLimitCooldown.firstWaitMs, rateLimitCooldown.capMs);
-        cooldowns.set(id, { until: Date.now() + wait, wait });
-        console.warn(`[${id}] ${new Date().toISOString()} rate limited, next try in ${wait / 1000}s`);
+      const cd = cooldowns.get(id);
+      if (cd && cd.until > Date.now()) {
+        return { text: '', thinking: '', error: cd.message, code: 'upstream_rate_limit', stopReason: 'end_turn', possiblySent: false };
       }
+      const r = await attempt();
+      if (signal.aborted) return r;
+      if (!(failed(r) && r.code === 'upstream_rate_limit')) { cooldowns.delete(id); return r; }
+      const wait = Math.min(cd ? cd.wait * 2 : rateLimitCooldown.firstWaitMs, rateLimitCooldown.capMs);
+      cooldowns.set(id, { until: Date.now() + wait, wait, message: r.error! });
+      console.warn(`[${id}] ${new Date().toISOString()} rate limited (${r.error}), next try in ${wait / 1000}s`);
+      return r;
     }
 
     // Web providers drive one shared browser tab, so requests run one at a time;
     // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
     // A failure after the message was sent is not retried: that would post it twice.
-    const run = () => queue.enqueue(provider.info.id, paced, signal);
+    const run = () => queue.enqueue(provider.info.id, paced);
     let reply = await run();
     if (signal.aborted) return disconnected();
     if (failed(reply) && !reply.possiblySent && !['upstream_rate_limit', 'auth_expired', 'account_muted'].includes(reply.code ?? '')) reply = await run();
@@ -168,7 +163,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       // Over the web's length cap: a retried 502 re-sends the whole prompt. Same shape as the real API.
       if (reply.code === 'context_length_exceeded') {
         const max = (await provider.models()).find(m => m.id === model)?.contextWindow;
-        const message = `prompt is too long: ${estimateTokens(buildWebPrompt(messages, tools))} tokens > ${max} maximum`;
+        const message = `prompt is too long: ${estimateTokens(buildWebPrompt(messages, tools, format))} tokens > ${max} maximum`;
         return c.json({ type: 'error', error: { type: 'invalid_request_error', message } }, 400);
       }
       const limited = reply.code === 'upstream_rate_limit';
@@ -178,7 +173,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       );
     }
 
-    let parsed = parseToolCalls(reply.text);
+    let parsed = parseReply(reply.text, format, tools);
     let reasked = false;
     // A garbled block with no complete call is asked once more rather than ending the turn.
     // With complete calls, those run and the rest is dropped: the model reissues it after the
@@ -188,17 +183,17 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       if (signal.aborted) return disconnected();
       const again = await run();
       reasked = true;
-      if (!failed(again)) { reply = again; parsed = parseToolCalls(again.text); }
+      if (!failed(again)) { reply = again; parsed = parseReply(again.text, format, tools); }
     }
 
-    const prompt = buildWebPrompt(messages, tools);
+    const prompt = buildWebPrompt(messages, tools, format);
     const inputTokens = estimateTokens(prompt);
     // One line per tool-call reply: the format's error rate (re-asks, lost calls, cuts) and the prompt split.
     if (parsed.calls.length || parsed.truncated || parsed.malformed) {
       const outcome = parsed.truncated ? 'truncated' : !parsed.malformed ? 'ok' : parsed.calls.length ? 'partial' : 'garbled';
-      const catalog = tools.length ? estimateTokens(renderToolsPrompt(tools)) : 0;
-      console.log(`[tools] ${new Date().toISOString()} ${provider.info.id} dsml ${outcome} calls=${parsed.calls.length}`
-        + ` reask=${+reasked} catalog=${catalog} history=${inputTokens - catalog}`
+      const catalog = tools.length ? estimateTokens(renderToolsPrompt(tools, format)) : 0;
+      console.log(`[tools] ${new Date().toISOString()} ${provider.info.id} ${format} ${outcome} calls=${parsed.calls.length}`
+        + `${parsed.slip ? ' slip=1' : ''} reask=${+reasked} catalog=${catalog} history=${inputTokens - catalog}`
         + (outcome === 'ok' ? '' : ` shape=${dsmlShape(reply.text)}`));
     }
 
@@ -276,7 +271,7 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
 type CallIndex = Map<string, { n: number; name: string }>;
 
 /** Anthropic request body → the messages and tools every provider consumes. */
-function toChatInput(body: any): { messages: Message[]; tools: ToolDef[] } {
+function toChatInput(body: any, format: ToolFormat = 'dsml'): { messages: Message[]; tools: ToolDef[] } {
   const messages: Message[] = [];
   const systemText = typeof body.system === 'string'
     ? body.system
@@ -285,7 +280,7 @@ function toChatInput(body: any): { messages: Message[]; tools: ToolDef[] } {
   // Calls precede their results, so one pass numbers both.
   const calls: CallIndex = new Map();
   for (const msg of body.messages) {
-    messages.push({ role: msg.role, content: messageToText(msg.content, calls) });
+    messages.push({ role: msg.role, content: messageToText(msg.content, calls, format) });
   }
   // Always set (maybe empty) so providers build the full agent transcript.
   const tools: ToolDef[] = (Array.isArray(body.tools) ? body.tools : [])
@@ -314,7 +309,7 @@ function blockToText(block: any, calls?: CallIndex): string {
   return ''; // thinking, redacted_thinking, etc.
 }
 
-function messageToText(content: unknown, index: CallIndex): string {
+function messageToText(content: unknown, index: CallIndex, format: ToolFormat): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   const calls = content
@@ -325,5 +320,5 @@ function messageToText(content: unknown, index: CallIndex): string {
       return { name: b.name, input: b.input ?? {}, call };
     });
   const text = content.map((b: any) => blockToText(b, index)).filter(Boolean).join('\n\n');
-  return calls.length ? [text, renderToolCalls(calls)].filter(Boolean).join('\n\n') : text;
+  return calls.length ? [text, renderToolCalls(calls, format)].filter(Boolean).join('\n\n') : text;
 }

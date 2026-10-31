@@ -12,6 +12,9 @@ export interface ProfilesApi {
   create: (name: string, engine: BrowserEngine) => Promise<ProfileManifest>;
   activate: (name: string) => Promise<ProfileManifest>;
   delete: (name: string) => Promise<void>;
+  /** Profiles whose DeepSeek accounts take calls in turn; empty = the active profile only. */
+  deepseekPool: () => string[];
+  setDeepSeekPool: (names: string[]) => Promise<string[]>;
 }
 
 export interface ManagementDeps {
@@ -127,7 +130,25 @@ export function managementRoutes(deps: ManagementDeps): Hono {
     return c.json({
       active: deps.profiles.active(),
       profiles: deps.profiles.list(),
+      deepseekPool: deps.profiles.deepseekPool(),
     });
+  });
+
+  app.post('/webmodel/profiles/deepseek-pool', async (c) => {
+    if (!deps.profiles) return c.json({ error: 'Profiles not available' }, 503);
+    const body = await readJson<{ names?: unknown }>(c);
+    const names = body?.names;
+    if (!Array.isArray(names) || names.some(n => typeof n !== 'string' || !n) || new Set(names).size !== names.length) {
+      return c.json({ error: 'Invalid DeepSeek turn', message: 'names must be a list of distinct profile names.' }, 400);
+    }
+    try {
+      return c.json({ deepseekPool: await deps.profiles.setDeepSeekPool(names) });
+    } catch (err) {
+      if (err instanceof ProfileError && err.code === 'not_found') {
+        return c.json({ error: 'Unknown profile', message: err.message }, 404);
+      }
+      return c.json({ error: 'DeepSeek turn refused', message: (err as Error).message }, 409);
+    }
   });
 
   app.post('/webmodel/profiles', async (c) => {
@@ -136,7 +157,7 @@ export function managementRoutes(deps: ManagementDeps): Hono {
     if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
     const engine = body.engine;
     if (!isBrowserEngine(engine)) {
-      return c.json({ error: 'Invalid engine', message: 'Engine must be "chrome", "camoufox" or "cloakbrowser".' }, 400);
+      return c.json({ error: 'Invalid engine', message: 'Engine must be "chrome", "camoufox", "cloakbrowser" or "apostate".' }, 400);
     }
     const name = typeof body.name === 'string' ? body.name : '';
     try {
