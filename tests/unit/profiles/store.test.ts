@@ -58,6 +58,13 @@ describe('ProfileStore', () => {
     expect(store.get('cloak')?.engine).toBe('cloakbrowser');
   });
 
+  it('reads back an apostate profile', async () => {
+    const store = new ProfileStore(stateDir);
+    await store.create('apo', 'apostate');
+
+    expect(store.get('apo')?.engine).toBe('apostate');
+  });
+
   it('rejects names that are not filesystem-safe slugs', async () => {
     const store = new ProfileStore(stateDir);
 

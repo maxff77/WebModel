@@ -147,7 +147,7 @@ program
   .option('--config <file>', 'config file path')
   .option('-v, --verbose', 'verbose logging')
   .option('--browser-mode <mode>', 'browser mode: attach (default) or launch', 'attach')
-  .option('--engine <engine>', 'engine for a newly created default profile: chrome (default), camoufox or cloakbrowser')
+  .option('--engine <engine>', 'engine for a newly created default profile: chrome (default), camoufox, cloakbrowser or apostate')
   .option('--profile <name>', 'active browser profile (default: default)')
   .option('--cdp-url <url>', 'Chrome CDP URL for attach mode', 'http://127.0.0.1:9222')
   .action(async (opts) => {
@@ -366,7 +366,7 @@ program
           status: 'login_started',
           message: browserMode === 'attach'
             ? 'A new tab opened in your Chrome. Log in and close the tab when done.'
-            : `A ${{ chrome: 'Chrome', camoufox: 'Camoufox', cloakbrowser: 'CloakBrowser' }[active.engine]} window opened. Log in and close it when done.`,
+            : `A ${{ chrome: 'Chrome', camoufox: 'Camoufox', cloakbrowser: 'CloakBrowser', apostate: 'Apostate' }[active.engine]} window opened. Log in and close it when done.`,
         };
       },
       getLoginState: () => browserManager.getLoginState(),
@@ -450,7 +450,7 @@ profileCommand
     const { stateDir, config: configFile, engine: requestedEngine } = program.opts();
     const engine = requestedEngine === undefined ? 'chrome' : isBrowserEngine(requestedEngine) ? requestedEngine : null;
     if (!engine) {
-      console.log(chalk.red(`  ✗ Unknown engine "${requestedEngine}". Use chrome, camoufox or cloakbrowser.`));
+      console.log(chalk.red(`  ✗ Unknown engine "${requestedEngine}". Use chrome, camoufox, cloakbrowser or apostate.`));
       process.exitCode = 1;
       return;
     }

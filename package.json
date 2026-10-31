@@ -52,6 +52,7 @@
     "vitest": "^4.1.2"
   },
   "optionalDependencies": {
+    "@heretic-tech/apostate": "^0.5.1",
     "camoufox-js": "^0.13.0",
     "cloakbrowser": "^0.6.4"
   }

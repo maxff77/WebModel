@@ -58,7 +58,7 @@ export class ProfileStore {
     try {
       const parsed = JSON.parse(readFileSync(join(this.profileRoot(name), 'manifest.json'), 'utf-8'));
       const { engine, createdAt, fallbackProfile } = parsed ?? {};
-      if (parsed?.name !== name || (engine !== 'chrome' && engine !== 'camoufox' && engine !== 'cloakbrowser') || typeof createdAt !== 'string') {
+      if (parsed?.name !== name || (engine !== 'chrome' && engine !== 'camoufox' && engine !== 'cloakbrowser' && engine !== 'apostate') || typeof createdAt !== 'string') {
         return undefined;
       }
       if (fallbackProfile !== undefined && typeof fallbackProfile !== 'string') return undefined;

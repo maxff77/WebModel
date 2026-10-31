@@ -11,7 +11,7 @@ export default defineConfig({
   sourcemap: true,
   dts: false,
   banner: { js: '#!/usr/bin/env node' },
-  external: ['playwright-core', 'camoufox-js', 'cloakbrowser'],
+  external: ['playwright-core', 'camoufox-js', 'cloakbrowser', '@heretic-tech/apostate'],
   onSuccess: async () => {
     const dashDir = join('dist', 'dashboard');
     mkdirSync(dashDir, { recursive: true });

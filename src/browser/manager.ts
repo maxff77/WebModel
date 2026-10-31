@@ -1,6 +1,9 @@
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import { findChromePath } from '../doctor.js';
 import { platform } from 'node:os';
+import { randomInt } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { DEFAULT_PROFILE, type ResolvedProfile } from '../profiles/store.js';
 import { BrowserUnavailableError } from '../core/errors.js';
 
@@ -26,7 +29,7 @@ export type BrowserLauncher = (options: BrowserLaunchOptions) => Promise<Browser
 /** Attach-mode seam, injected in tests instead of dialing a real CDP endpoint. */
 export type CdpConnector = (cdpUrl: string, timeout: number) => Promise<Browser>;
 
-export type BrowserEngine = 'chrome' | 'camoufox' | 'cloakbrowser';
+export type BrowserEngine = 'chrome' | 'camoufox' | 'cloakbrowser' | 'apostate';
 
 /** The manager only needs the identity, engine, data dir and fallback of a profile. */
 export type ActiveProfile = Pick<
@@ -35,7 +38,7 @@ export type ActiveProfile = Pick<
 >;
 
 export function isBrowserEngine(value: unknown): value is BrowserEngine {
-  return value === 'chrome' || value === 'camoufox' || value === 'cloakbrowser';
+  return value === 'chrome' || value === 'camoufox' || value === 'cloakbrowser' || value === 'apostate';
 }
 
 /** Attach drives the user's own Chrome; every other engine is a browser we launch. */
@@ -76,6 +79,8 @@ export interface BrowserManagerOptions {
 
 const CHROME_ARGS = ['--no-first-run', '--no-default-browser-check'];
 
+const HOST_OS = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
+
 async function launchChromeContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
   const executablePath = findChromePath();
   if (!executablePath) {
@@ -108,12 +113,11 @@ async function launchCamoufoxContext(options: BrowserLaunchOptions): Promise<Bro
     // No fingerprint argument: Camoufox generates its own BrowserForge
     // fingerprint per launch, matched to its pinned build. Constrain it to the
     // host OS so the spoofed platform matches the fonts and hardware around it.
-    const os = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     return await Camoufox({
       user_data_dir: options.profileDir,
       headless: options.headless,
       timeout: options.timeout,
-      os,
+      os: HOST_OS,
       // Camoufox injects uBlock Origin by default. Its lists abort DeepSeek's
       // device-fingerprint endpoints (gator.volces.com, fp-it-acc.portal101.cn),
       // which a normal browser lets through. Removing it does not fix the
@@ -150,10 +154,48 @@ async function launchCloakBrowserContext(options: BrowserLaunchOptions): Promise
   });
 }
 
+/**
+ * Apostate draws a new machine on every launch unless given a seed, so each
+ * profile keeps one in <profileDir>/.apostate-seed, as the CloakBrowser
+ * wrapper does for itself.
+ */
+export async function profileSeed(profileDir: string): Promise<number> {
+  const seedFile = join(profileDir, '.apostate-seed');
+  const saved = Number((await readFile(seedFile, 'utf-8').catch(() => '')).trim());
+  if (Number.isInteger(saved) && saved > 0) return saved;
+  const seed = randomInt(10000, 100000);
+  await mkdir(profileDir, { recursive: true });
+  await writeFile(seedFile, String(seed));
+  return seed;
+}
+
+async function launchApostateContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
+  let launchPersistentContext: (userDataDir: string, opts: Record<string, unknown>) => Promise<BrowserContext>;
+  try {
+    // Optional dependency: only users of this engine need it.
+    ({ launchPersistentContext } = await import('@heretic-tech/apostate' as string));
+  } catch (err) {
+    throw new Error(
+      `Apostate is not installed or could not be loaded: ${(err as Error).message}\n` +
+      'Run: npm install @heretic-tech/apostate\n' +
+      'Then download the browser binary with: npx apostate install',
+    );
+  }
+  // Fully open source (GPL-3.0). It passed DeepSeek's hCaptcha and finished
+  // the login (2026-10-29). Canvas/audio noise stays off: it is detectable.
+  return launchPersistentContext(options.profileDir, {
+    fingerprint: await profileSeed(options.profileDir),
+    fingerprintPlatform: HOST_OS,
+    headless: options.headless,
+    timeout: options.timeout,
+  });
+}
+
 const defaultLaunchers: Record<BrowserEngine, BrowserLauncher> = {
   chrome: launchChromeContext,
   camoufox: launchCamoufoxContext,
   cloakbrowser: launchCloakBrowserContext,
+  apostate: launchApostateContext,
 };
 
 async function connectOverCDP(cdpUrl: string, timeout: number): Promise<Browser> {

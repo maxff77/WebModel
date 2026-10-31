@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Browser, BrowserContext } from 'playwright-core';
 import {
   BrowserManager,
+  profileSeed,
   type ActiveProfile,
   type BrowserManagerOptions,
 } from '../../../src/browser/manager.js';
@@ -157,6 +161,18 @@ describe('BrowserManager profiles', () => {
     expect(manager.getMode()).toBe('launch');
     await expect(manager.ensureBrowser()).resolves.toBe(context);
     expect(launch).toHaveBeenCalledWith(expect.objectContaining({ profileDir: '/tmp/p/cb/data' }));
+  });
+
+  it('keeps one apostate seed per profile across launches', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'seed-')), 'data');
+
+    const seed = await profileSeed(dir);
+
+    expect(seed).toBeGreaterThanOrEqual(10000);
+    expect(readFileSync(join(dir, '.apostate-seed'), 'utf-8')).toBe(String(seed));
+    await expect(profileSeed(dir)).resolves.toBe(seed);
+    writeFileSync(join(dir, '.apostate-seed'), 'garbage');
+    await expect(profileSeed(dir)).resolves.not.toBeNaN();
   });
 
   it('launches camoufox when attach mode is requested', async () => {
