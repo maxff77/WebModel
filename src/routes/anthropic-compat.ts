@@ -139,10 +139,10 @@ export function anthropicRoutes(registry: ProviderRegistry, queue = new Provider
       return r;
     }
 
-    // Web providers drive one shared browser tab, so requests run one at a time;
-    // a single retry absorbs transient tab errors (e.g. a navigation mid-request).
+    // Web providers drive one shared browser tab, so requests run one at a time
+    // (the account turn: one per account); a single retry absorbs transient tab errors (e.g. a navigation mid-request).
     // A failure after the message was sent is not retried: that would post it twice.
-    const run = () => queue.enqueue(provider.info.id, paced);
+    const run = () => queue.run(provider, paced);
     let reply = await run();
     if (signal.aborted) return disconnected();
     if (failed(reply) && !reply.possiblySent && !['upstream_rate_limit', 'auth_expired', 'account_muted'].includes(reply.code ?? '')) reply = await run();

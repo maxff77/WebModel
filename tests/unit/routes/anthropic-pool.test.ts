@@ -1,9 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createTestContext, type TestContext } from '../../helpers/test-server.js';
 import { BaseProvider, type ChatRequest, type ModelInfo, type ProviderInfo } from '../../../src/core/provider.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { ProviderPool } from '../../../src/core/pool.js';
 import { rateLimitCooldown } from '../../../src/routes/anthropic-compat.js';
+import { DeepSeekProvider } from '../../../src/providers/deepseek/index.js';
+import { AuthStore } from '../../../src/auth/store.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // One account: answers its own name unless a scripted reply is queued for the next call.
 class Account extends BaseProvider {
@@ -11,16 +16,29 @@ class Account extends BaseProvider {
     id: 'cap', name: 'Cap', website: 'https://x', loginUrl: 'https://x', needsBrowser: false,
   };
   calls = 0;
+  inFlight = 0;
+  maxInFlight = 0;
+  /** Each call waits on this before answering, so the test controls overlap. */
+  hold: Promise<void> = Promise.resolve();
   authenticated = true;
+  /** DeepSeek: `expired` still passes isAuthenticated() but reads logged out here. */
+  loggedInHere = true;
   next: StreamEvent[][] = [];
   constructor(readonly name: string) { super(); }
   async login() {}
   async isAuthenticated() { return this.authenticated; }
+  async isLoggedInHere() { return this.authenticated && this.loggedInHere; }
   async detectLoginComplete() { return true; }
   async models(): Promise<ModelInfo[]> { return [{ id: 'm', name: 'm', contextWindow: 1, maxOutput: 1 }]; }
   async *chat(_req: ChatRequest): AsyncIterable<StreamEvent> {
     this.calls++;
-    yield* this.next.shift() ?? [{ type: 'text_delta', delta: this.name }, { type: 'done', reason: 'stop' }];
+    this.maxInFlight = Math.max(this.maxInFlight, ++this.inFlight);
+    try {
+      await this.hold;
+      yield* this.next.shift() ?? [{ type: 'text_delta', delta: this.name }, { type: 'done', reason: 'stop' }];
+    } finally {
+      this.inFlight--;
+    }
   }
 }
 
@@ -66,11 +84,40 @@ describe('Anthropic route over DeepSeek accounts in turn', () => {
     expect(text).toBe('A');
   });
 
+  // 2026-10-31: DeepSeek dropped the active profile's session and its account marked itself
+  // expired, but the row still read logged in, so the dashboard hid the Login button.
+  it('an account that marks itself expired shows Login on the active profile', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wmb-auth-'));
+    const main = new AuthStore(dir, () => '1a');
+    main.setStatus('deepseek-web', 'active');
+    const member = new AuthStore(dir, () => '1a');
+    const pool = new ProviderPool([{ name: '1a', provider: new DeepSeekProvider(member) }], new DeepSeekProvider(main));
+    ctx = createTestContext({ providers: [pool as any] });
+    const row = async () => ((await (await ctx.app.request('/webmodel/providers')).json()) as any).providers[0].authenticated;
+
+    expect(await row()).toBe(true);
+    // What chat() writes when the page is on /sign_in.
+    member.setStatus('deepseek-web', 'expired');
+    expect(await row()).toBe(false);
+  });
+
   it('calls alternate strictly between accounts', async () => {
     setup('A', 'B');
     const served = [];
     for (let i = 0; i < 4; i++) served.push((await ask()).text);
     expect(served).toEqual(['A', 'B', 'A', 'B']);
+  });
+
+  // 2026-11-02: one call in flight across every account made the turn as slow as one account.
+  it('calls run at once, one per account; an extra call waits for a free account', async () => {
+    const [a, b] = setup('A', 'B');
+    let release!: () => void;
+    a.hold = b.hold = new Promise(r => { release = r; });
+    const calls = [ask(), ask(), ask()];
+    await vi.waitFor(() => expect([a.calls, b.calls]).toEqual([1, 1]), { timeout: 500 });
+    release();
+    expect((await Promise.all(calls)).map(r => r.text).sort()).toEqual(['A', 'A', 'B']);
+    expect([a.maxInFlight, b.maxInFlight]).toEqual([1, 1]);
   });
 
   it('a muted account hands the same call to the next one and stays out until its end date', async () => {
@@ -100,6 +147,30 @@ describe('Anthropic route over DeepSeek accounts in turn', () => {
     a.authenticated = true;
     expect((await ask()).text).toBe('A');
     expect(a.calls).toBe(1);
+  });
+
+  // 2026-11-02: bridge.log showed closed accounts probed again on every call, ~10 s each
+  // (73 calls, most paying ~60 s for six dead accounts before a live one answered).
+  it('an account whose session closed sits out; a dashboard login or the 5 min re-check brings it back', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const [a] = setup('A', 'B');
+      a.loggedInHere = false;
+      a.next.push(loggedOut);
+      expect((await ask()).text).toBe('B');
+      expect((await ask()).text).toBe('B');
+      expect(a.calls).toBe(1);
+      // A re-login typed into its own window shows only when a call reaches the page.
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      expect((await ask()).text).toBe('A');
+      expect((await ask()).text).toBe('B');
+      a.next.push(loggedOut);
+      expect((await ask()).text).toBe('B');
+      a.loggedInHere = true;
+      expect((await ask()).text).toBe('A');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('never re-sends to another account once the first one produced content', async () => {

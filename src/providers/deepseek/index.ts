@@ -94,6 +94,11 @@ export class DeepSeekProvider extends BaseProvider {
     return this.authStore.getStatus(this.info.id).status !== 'none';
   }
 
+  /** The dashboard row: a closed session must offer Login again, even though chat() still looks. */
+  async isLoggedInHere(): Promise<boolean> {
+    return this.authStore.getStatus(this.info.id).status === 'active';
+  }
+
   async detectLoginComplete(): Promise<boolean> {
     return false;
   }

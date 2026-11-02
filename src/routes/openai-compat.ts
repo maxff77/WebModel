@@ -61,7 +61,7 @@ export function openaiRoutes(registry: ProviderRegistry, queue = new ProviderQue
       return stream(c, async (s) => {
         let isFirst = true;
         try {
-          await queue.enqueue(provider.info.id, async () => {
+          await queue.run(provider, async () => {
             for await (const event of provider.chat({ model, messages, stream: true })) {
               const chunk = formatStreamChunk(runId, body.model, event, isFirst);
               await s.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -84,7 +84,7 @@ export function openaiRoutes(registry: ProviderRegistry, queue = new ProviderQue
     // Non-streaming
     let fullContent = '';
     let lastError: string | null = null;
-    await queue.enqueue(provider.info.id, async () => {
+    await queue.run(provider, async () => {
       for await (const event of provider.chat({ model, messages, stream: false })) {
         if (event.type === 'text_delta') {
           fullContent += event.delta;

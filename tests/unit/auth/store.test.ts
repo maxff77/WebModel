@@ -138,13 +138,12 @@ describe('AuthStore per profile', () => {
     expect(new AuthStore(testDir, () => 'default').getStatus('deepseek-web').status).toBe('active');
   });
 
-  it('a store pinned to one profile sees a login another store wrote once reloaded', () => {
+  it('a store pinned to one profile sees a login another store wrote', () => {
     const account = new AuthStore(testDir, () => 'cuenta1');
+    expect(account.getStatus('deepseek-web').status).toBe('none');
     const dashboard = new AuthStore(testDir, () => 'default');
     dashboard.setStatus('deepseek-web', 'active', 'cuenta1');
 
-    expect(account.getStatus('deepseek-web').status).toBe('none');
-    account.reload();
     expect(account.getStatus('deepseek-web').status).toBe('active');
   });
 

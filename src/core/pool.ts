@@ -11,8 +11,11 @@ interface Member extends PoolMember {
   mutedUntil: number;
   coolUntil: number;
   coolWait: number;
+  loggedOutUntil: number;
   /** Marked out of the turn; logged once when it serves again. */
   out: boolean;
+  /** One call per account: its browser tab is the scarce resource. */
+  busy: boolean;
 }
 
 type ErrorEvent = Extract<StreamEvent, { type: 'error' }>;
@@ -23,26 +26,30 @@ const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit'
 // Cooldown per account after "too frequent": doubles from 5 s up to 10 min, like the route's.
 const FIRST_WAIT_MS = 5_000;
 const CAP_MS = 600_000;
+// A closed session costs ~10 s to find (page reload + bearer wait). Probed again after this,
+// so a re-login typed into the account's own window is still picked up.
+const LOGGED_OUT_RECHECK_MS = 300_000;
 
 const log = (line: string) => console.log(`[pool] ${new Date().toISOString()} ${line}`);
 const when = (t: number) => Number.isFinite(t) ? new Date(t).toISOString() : 'unknown';
 
 /**
- * One provider's accounts in strict turn (A, B, A, B…). It spreads the volume
- * without adding any: the queue keeps one call in flight across all accounts. A call
- * an account refuses before answering moves on to the next account.
+ * One provider's accounts in turn (A, B, A, B…), one call in flight per account, so
+ * N accounts serve N calls at once; an extra call waits for the first free account.
+ * A call an account refuses before answering moves on to the next account.
  */
 export class ProviderPool extends BaseProvider {
   readonly info: ProviderInfo;
   private members: Member[];
   private cursor = 0;
+  private freed: Array<() => void> = [];
 
   /** `here`: the provider on the active profile, whose login the dashboard shows. */
   constructor(members: PoolMember[], private readonly here?: BaseProvider) {
     super();
     if (members.length === 0) throw new Error('A provider pool needs at least one account.');
     this.info = members[0].provider.info;
-    this.members = members.map(m => ({ ...m, mutedUntil: 0, coolUntil: 0, coolWait: 0, out: false }));
+    this.members = members.map(m => ({ ...m, mutedUntil: 0, coolUntil: 0, coolWait: 0, loggedOutUntil: 0, out: false, busy: false }));
   }
 
   // ponytail: login only opens the provider's URL; the CLI runs it on the active profile.
@@ -56,7 +63,7 @@ export class ProviderPool extends BaseProvider {
   }
 
   isLoggedInHere(): Promise<boolean> {
-    return this.here ? this.here.isAuthenticated() : this.isAuthenticated();
+    return this.here ? this.here.isLoggedInHere() : this.isAuthenticated();
   }
 
   detectLoginComplete(): Promise<boolean> {
@@ -70,15 +77,20 @@ export class ProviderPool extends BaseProvider {
   async *chat(req: ChatRequest): AsyncIterable<StreamEvent> {
     const tried = new Set<Member>();
     for (let member = await this.next(tried); member; member = await this.next(tried)) {
-      if (req.signal?.aborted) return;
       tried.add(member);
-      log(`${this.info.id} → ${member.name}`);
-      let produced = false;
       let refusal: ErrorEvent | null = null;
-      for await (const event of member.provider.chat(req)) {
-        if (event.type === 'error' && !produced && REFUSALS.has(event.code ?? '')) { refusal = event; break; }
-        if (event.type !== 'error' && event.type !== 'done') produced = true;
-        yield event;
+      try {
+        if (req.signal?.aborted) return;
+        log(`${this.info.id} → ${member.name}`);
+        let produced = false;
+        for await (const event of member.provider.chat(req)) {
+          if (event.type === 'error' && !produced && REFUSALS.has(event.code ?? '')) { refusal = event; break; }
+          if (event.type !== 'error' && event.type !== 'done') produced = true;
+          yield event;
+        }
+      } finally {
+        member.busy = false;
+        this.freed.splice(0).forEach(wake => wake());
       }
       if (!refusal) { member.coolWait = 0; return; }
       this.markOut(member, refusal);
@@ -86,20 +98,31 @@ export class ProviderPool extends BaseProvider {
     yield this.allDown();
   }
 
-  /** First account free from the cursor on; the next call starts after it. */
+  /** First account free from the cursor on, taken busy; the next call starts after it. All busy: waits. */
   private async next(tried: Set<Member>): Promise<Member | undefined> {
-    const now = Date.now();
-    for (let i = 0; i < this.members.length; i++) {
-      const index = (this.cursor + i) % this.members.length;
-      const m = this.members[index];
-      if (tried.has(m) || m.mutedUntil > now || m.coolUntil > now) continue;
-      // Logged out is the account's own auth state, so a dashboard login brings it back.
-      if (!(await m.provider.isAuthenticated())) continue;
-      this.cursor = index + 1;
-      if (m.out) { m.out = false; log(`${m.name} back in turn`); }
-      return m;
+    for (;;) {
+      const now = Date.now();
+      // Read once: a concurrent call moves the cursor during the awaits below.
+      const start = this.cursor;
+      let busy = false;
+      for (let i = 0; i < this.members.length; i++) {
+        const index = (start + i) % this.members.length;
+        const m = this.members[index];
+        if (tried.has(m) || m.mutedUntil > now || m.coolUntil > now) continue;
+        // Logged out is the account's own auth state, so a dashboard login brings it back.
+        if (!(await m.provider.isAuthenticated())) continue;
+        // DeepSeek lets `expired` through isAuthenticated(); a dashboard login reads logged in here.
+        if (m.loggedOutUntil > now && !(await m.provider.isLoggedInHere())) continue;
+        // After the await: a concurrent call may have taken it meanwhile.
+        if (m.busy) { busy = true; continue; }
+        m.busy = true;
+        this.cursor = index + 1;
+        if (m.out) { m.out = false; log(`${m.name} back in turn`); }
+        return m;
+      }
+      if (!busy) return undefined;
+      await new Promise<void>(wake => this.freed.push(wake));
     }
-    return undefined;
   }
 
   private markOut(m: Member, refusal: ErrorEvent): void {
@@ -113,7 +136,8 @@ export class ProviderPool extends BaseProvider {
       m.coolUntil = Date.now() + m.coolWait;
       log(`${m.name} out: too frequent, cooling ${m.coolWait / 1000}s`);
     } else {
-      log(`${m.name} out: logged out`);
+      m.loggedOutUntil = Date.now() + LOGGED_OUT_RECHECK_MS;
+      log(`${m.name} out: logged out, next check in ${LOGGED_OUT_RECHECK_MS / 1000}s`);
     }
   }
 

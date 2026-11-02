@@ -317,7 +317,6 @@ program
     // dir), else a browser of its own, opened on its first call. The dashboard can
     // change the turn while running; a browser left out closes on idleShutdown.
     const poolBrowsers = new Map<string, BrowserManager>();
-    const poolAuth = new Map<string, AuthStore>();
     const singleDeepSeek = registry.getProvider('deepseek-web');
     let deepseekPool: string[] = [];
     const setDeepSeekPool = (names: string[]) => {
@@ -327,7 +326,6 @@ program
         const attachError = attachProfileError(profile, requestedMode);
         if (attachError) throw new Error(attachError);
         const auth = new AuthStore(stateDir, () => name);
-        poolAuth.set(name, auth);
         const browserFor = () => {
           if (browserManager.getProfile().name === name) return browserManager;
           let own = poolBrowsers.get(name);
@@ -425,7 +423,6 @@ program
         await browserManager.startLogin(providerId, provider.info.loginUrl, (success, profile) => {
           if (success) {
             authStore.setStatus(providerId, 'active', profile);
-            poolAuth.get(profile)?.reload();
             console.log(chalk.green(`  ✓ ${providerId} login completed. Cookies saved.`));
           } else {
             console.log(chalk.yellow(`  ⚠ ${providerId} login did not complete.`));

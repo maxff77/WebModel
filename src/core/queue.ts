@@ -1,8 +1,16 @@
+import type { BaseProvider } from './provider.js';
+import { ProviderPool } from './pool.js';
+
 /**
  * One call at a time per provider (web providers share one browser tab). No pacing:
  * the route reacts to the provider's own "too frequent" / muted answers instead.
  */
 export class ProviderQueue {
+  /** The account turn keeps its own lanes (one call per account), so it skips the queue. */
+  run<T>(provider: BaseProvider, fn: () => Promise<T>): Promise<T> {
+    return provider instanceof ProviderPool ? fn() : this.enqueue(provider.info.id, fn);
+  }
+
   private queues = new Map<string, Promise<void>>();
 
   async enqueue<T>(providerId: string, fn: () => Promise<T>): Promise<T> {

@@ -17,6 +17,10 @@ interface AuthData {
   };
 }
 
+// Bumped by every store's write: the pool's per-account stores and the main one
+// share auth.json files, so a cache older than the last write is stale.
+let writes = 0;
+
 /**
  * Login state per profile and provider. Reads and writes follow the active
  * profile, so switching profiles switches the visible auth state.
@@ -24,6 +28,7 @@ interface AuthData {
 export class AuthStore {
   private data: AuthData;
   private profile: string;
+  private seen = writes;
 
   constructor(
     private readonly stateDir: string,
@@ -38,18 +43,13 @@ export class AuthStore {
     return join(this.stateDir, 'profiles', profile, 'auth.json');
   }
 
-  /** Reload when the active profile changed since the last call. */
+  /** Reload when the active profile changed or any store wrote since the last call. */
   private sync(): void {
     const profile = this.activeProfile();
-    if (profile === this.profile) return;
+    if (profile === this.profile && this.seen === writes) return;
     this.profile = profile;
+    this.seen = writes;
     this.data = this.load(profile);
-  }
-
-  /** Re-read the file: another store (the dashboard login) may have written it. */
-  reload(): void {
-    this.profile = this.activeProfile();
-    this.data = this.load(this.profile);
   }
 
   getStatus(providerId: string): ProviderAuthStatus {
@@ -118,5 +118,6 @@ export class AuthStore {
     const path = this.filePath(profile);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(data, null, 2));
+    writes++;
   }
 }
