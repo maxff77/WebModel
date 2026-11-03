@@ -22,5 +22,11 @@ export default defineConfig({
         // Dashboard files may not exist yet
       }
     }
+    // pow.ts reads this beside the bundled CLI; without it every DeepSeek call
+    // fails with ENOENT before reaching the account.
+    copyFileSync(
+      join('src', 'providers', 'deepseek', 'deepseek-hash-v1.wasm.b64'),
+      join('dist', 'deepseek-hash-v1.wasm.b64'),
+    );
   },
 });
