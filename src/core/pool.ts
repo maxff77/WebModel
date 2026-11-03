@@ -20,6 +20,15 @@ interface Member extends PoolMember {
 
 type ErrorEvent = Extract<StreamEvent, { type: 'error' }>;
 
+/** What the pool turned down, for the server's refusal journal. */
+export interface PoolRefusal {
+  profile: string;
+  code: string;
+  /** Epoch ms when the sanction ends, when the provider reports one. */
+  until?: number;
+  at: string;
+}
+
 // The account turned the message down, so another account can take it without a duplicate.
 const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit']);
 
@@ -45,7 +54,11 @@ export class ProviderPool extends BaseProvider {
   private freed: Array<() => void> = [];
 
   /** `here`: the provider on the active profile, whose login the dashboard shows. */
-  constructor(members: PoolMember[], private readonly here?: BaseProvider) {
+  constructor(
+    members: PoolMember[],
+    private readonly here?: BaseProvider,
+    private readonly onRefusal?: (refusal: PoolRefusal) => void,
+  ) {
     super();
     if (members.length === 0) throw new Error('A provider pool needs at least one account.');
     this.info = members[0].provider.info;
@@ -94,6 +107,12 @@ export class ProviderPool extends BaseProvider {
       }
       if (!refusal) { member.coolWait = 0; return; }
       this.markOut(member, refusal);
+      this.onRefusal?.({
+        profile: member.name,
+        code: refusal.code ?? '',
+        until: refusal.until,
+        at: new Date().toISOString(),
+      });
     }
     yield this.allDown();
   }

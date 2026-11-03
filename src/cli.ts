@@ -12,6 +12,7 @@ import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
 import { ProviderPool } from './core/pool.js';
+import { createRefusalJournal } from './core/refusal-journal.js';
 import { KimiProvider } from './providers/kimi-web/index.js';
 import { QwenProvider } from './providers/qwen-web/index.js';
 import { GLMProvider } from './providers/glm-web/index.js';
@@ -345,7 +346,9 @@ program
         };
         return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserFor().getPageForOrigin(origin)) };
       });
-      registry.register(members.length > 0 ? new ProviderPool(members, singleDeepSeek) : singleDeepSeek);
+      registry.register(members.length > 0
+        ? new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')))
+        : singleDeepSeek);
       deepseekPool = names;
       console.log(chalk.green('  ✓') + ` DeepSeek accounts in turn: ${names.join(', ') || 'none, the active profile only'}`);
       return names;
