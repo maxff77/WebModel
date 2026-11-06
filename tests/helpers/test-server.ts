@@ -3,7 +3,7 @@ import { ProviderRegistry } from '../../src/core/registry.js';
 import { AuthStore } from '../../src/auth/store.js';
 import { MockProvider } from './mock-provider.js';
 import type { BrowserEngine } from '../../src/browser/manager.js';
-import type { ProfilesApi } from '../../src/routes/management.js';
+import type { BrowserPoolCount, ProfilesApi } from '../../src/routes/management.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,7 @@ export function createTestContext(opts?: {
   providers?: MockProvider[];
   fallbackModel?: string;
   browserEngine?: BrowserEngine;
+  browserPool?: BrowserPoolCount;
   /** Built from the context's temp stateDir, so tests can use a real ProfileStore. */
   profiles?: (stateDir: string) => ProfilesApi;
 }): TestContext {
@@ -46,6 +47,7 @@ export function createTestContext(opts?: {
     authStore,
     authToken: opts?.authToken ?? null,
     getBrowserEngine: opts?.browserEngine ? () => opts.browserEngine! : undefined,
+    getBrowserPool: opts?.browserPool ? () => opts.browserPool! : undefined,
     profiles: opts?.profiles?.(stateDir),
   });
 

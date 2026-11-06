@@ -87,6 +87,14 @@ describe('Management endpoints', () => {
       const body = await res.json();
       expect(body.browser.profile).toBe('default');
     });
+
+    it('reports the live browsers of the turn and their cap', async () => {
+      ctx = createTestContext({ browserPool: { live: 2, max: 3 } });
+      const res = await ctx.app.request('/webmodel/health');
+      const body = await res.json();
+      expect(body.browser.liveBrowsers).toBe(2);
+      expect(body.browser.maxLiveBrowsers).toBe(3);
+    });
   });
 
   describe('profiles', () => {

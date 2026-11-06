@@ -19,6 +19,8 @@ export interface BridgeConfig {
     profileDir: string;
     startupTimeout: number;
     idleShutdown: number;
+    /** Live browsers of the DeepSeek turn; 0 disables the cap. */
+    maxLiveBrowsers: number;
     loginTimeout: number;
     /** Launch mode only: false shows the browser window while it serves requests. */
     headless: boolean;
@@ -58,6 +60,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
       profileDir: join(stateDir, 'chrome-profile'),
       startupTimeout: 30000,
       idleShutdown: 300,
+      maxLiveBrowsers: 3,
       loginTimeout: 600,
       headless: true,
       mode: 'attach',
@@ -129,6 +132,9 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
 
   // An invalid engine in YAML falls back to chrome. A bad CLI/env override is ignored.
   config.browser.engine = asEngine(config.browser.engine) ?? 'chrome';
+  // 0 disables the cap; a negative or unparseable value falls back to the default.
+  const maxLive = Number(config.browser.maxLiveBrowsers);
+  config.browser.maxLiveBrowsers = Number.isFinite(maxLive) && maxLive >= 0 ? Math.floor(maxLive) : 3;
 
   // CLI overrides
   if (opts.port !== undefined) config.server.port = opts.port;

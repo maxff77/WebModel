@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { openaiRoutes } from './routes/openai-compat.js';
 import { anthropicRoutes } from './routes/anthropic-compat.js';
 import { ProviderQueue } from './core/queue.js';
-import { managementRoutes, type ManagementDeps, type ProfilesApi } from './routes/management.js';
+import { managementRoutes, type BrowserPoolCount, type ManagementDeps, type ProfilesApi } from './routes/management.js';
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
 import type { BrowserEngine, BrowserStatus, LoginState } from './browser/manager.js';
@@ -20,6 +20,7 @@ export interface AppOptions {
   onLogin?: (providerId: string) => Promise<{ status: string; message: string }>;
   getBrowserStatus?: () => BrowserStatus;
   getBrowserEngine?: () => BrowserEngine;
+  getBrowserPool?: () => BrowserPoolCount;
   getLoginState?: () => LoginState;
   profiles?: ProfilesApi;
 }
@@ -79,6 +80,7 @@ export function createApp(opts: AppOptions): Hono {
     getLoginState: opts.getLoginState,
     getBrowserStatus: opts.getBrowserStatus,
     getBrowserEngine: opts.getBrowserEngine,
+    getBrowserPool: opts.getBrowserPool,
     profiles: opts.profiles,
     startTime: Date.now(),
   };

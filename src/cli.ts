@@ -7,10 +7,12 @@ import { loadConfig, writeActiveProfile, writeDeepSeekProfiles } from './config/
 import { ProviderRegistry } from './core/registry.js';
 import { AuthStore } from './auth/store.js';
 import { BrowserManager, attachProfileError, effectiveMode, isBrowserEngine } from './browser/manager.js';
+import { LiveBrowsers } from './browser/live.js';
 import { ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
 import { DeepSeekProvider } from './providers/deepseek/index.js';
+import { DEEPSEEK_WEB_BASE_URL } from './providers/deepseek/client.js';
 import { ProviderPool } from './core/pool.js';
 import { createRefusalJournal } from './core/refusal-journal.js';
 import { KimiProvider } from './providers/kimi-web/index.js';
@@ -317,7 +319,27 @@ program
     // browser while that is on its profile (Chromium refuses a second launch on one
     // dir), else a browser of its own, opened on its first call. The dashboard can
     // change the turn while running; a browser left out closes on idleShutdown.
-    const poolBrowsers = new Map<string, BrowserManager>();
+    const liveBrowsers = new LiveBrowsers<BrowserManager>({
+      maxLive: config.browser.maxLiveBrowsers,
+      create: (name) => {
+        const profile = profiles.resolve(name);
+        return new BrowserManager({
+          profile,
+          startupTimeout: config.browser.startupTimeout,
+          idleShutdown: config.browser.idleShutdown,
+          loginTimeout: config.browser.loginTimeout,
+          headless: config.browser.headless,
+          cdpUrl,
+          mode: effectiveMode(profile.engine, requestedMode),
+        });
+      },
+      warm: async (manager) => { await manager.getPageForOrigin(DEEPSEEK_WEB_BASE_URL); },
+      log: (line) => console.log(chalk.gray(`  … ${line}`)),
+    });
+    const browserPageFor = async (name: string, origin: string) => {
+      const manager = browserManager.getProfile().name === name ? browserManager : await liveBrowsers.ensure(name);
+      return manager.getPageForOrigin(origin);
+    };
     const singleDeepSeek = registry.getProvider('deepseek-web');
     let deepseekPool: string[] = [];
     const setDeepSeekPool = (names: string[]) => {
@@ -327,28 +349,25 @@ program
         const attachError = attachProfileError(profile, requestedMode);
         if (attachError) throw new Error(attachError);
         const auth = new AuthStore(stateDir, () => name);
-        const browserFor = () => {
-          if (browserManager.getProfile().name === name) return browserManager;
-          let own = poolBrowsers.get(name);
-          if (!own) {
-            own = new BrowserManager({
-              profile,
-              startupTimeout: config.browser.startupTimeout,
-              idleShutdown: config.browser.idleShutdown,
-              loginTimeout: config.browser.loginTimeout,
-              headless: config.browser.headless,
-              cdpUrl,
-              mode: effectiveMode(profile.engine, requestedMode),
-            });
-            poolBrowsers.set(name, own);
-          }
-          return own;
-        };
-        return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserFor().getPageForOrigin(origin)) };
+        return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserPageFor(name, origin)) };
       });
-      registry.register(members.length > 0
-        ? new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')))
-        : singleDeepSeek);
+      const capRaw = Number(process.env.WMB_ACCOUNT_MAX_PER_HOUR ?? 10);
+      const hourlyCap = Number.isFinite(capRaw) && capRaw >= 0 ? capRaw : 10;
+      let pool: ProviderPool | undefined;
+      if (members.length > 0) {
+        pool = new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')), hourlyCap, {
+          onAcquire: (member) => {
+            liveBrowsers.hold(member.name);
+            // Warm the account the next call will take while this one streams.
+            void pool?.peekNext().then((next) => {
+              // The active profile's browser is the main one, not a turn browser.
+              if (next && next.name !== browserManager.getProfile().name) void liveBrowsers.prefetch(next.name);
+            }).catch(() => {});
+          },
+          onRelease: (member) => liveBrowsers.release(member.name),
+        });
+      }
+      registry.register(pool ?? singleDeepSeek);
       deepseekPool = names;
       console.log(chalk.green('  ✓') + ` DeepSeek accounts in turn: ${names.join(', ') || 'none, the active profile only'}`);
       return names;
@@ -388,6 +407,7 @@ program
       authToken: config.server.authToken,
       getBrowserStatus: () => browserManager.getStatus(),
       getBrowserEngine: () => browserManager.getEngine(),
+      getBrowserPool: () => ({ live: liveBrowsers.count(), max: liveBrowsers.max }),
       profiles: {
         list: () => profiles.list(),
         active: () => browserManager.getProfile().name,
@@ -395,8 +415,7 @@ program
         activate: async (name) => {
           const profile = profiles.resolve(name);
           // The turn may hold this profile's browser open; close it before the main one takes the dir.
-          await poolBrowsers.get(name)?.shutdown();
-          poolBrowsers.delete(name);
+          await liveBrowsers.close(name);
           await browserManager.activate(profile);
           writeActiveProfile({ stateDir, configFile: opts.config, profile: name });
           return { name: profile.name, engine: profile.engine, createdAt: profile.createdAt };
@@ -479,7 +498,7 @@ program
 
     process.on('SIGINT', async () => {
       console.log(chalk.gray('\n  Shutting down...'));
-      await Promise.all([browserManager, ...poolBrowsers.values()].map(m => m.shutdown()));
+      await Promise.all([browserManager.shutdown(), liveBrowsers.closeAll()]);
       process.exit(0);
     });
   });

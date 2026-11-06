@@ -17,6 +17,12 @@ export interface ProfilesApi {
   setDeepSeekPool: (names: string[]) => Promise<string[]>;
 }
 
+/** Live browsers of the DeepSeek turn and the cap that binds them. */
+export interface BrowserPoolCount {
+  live: number;
+  max: number;
+}
+
 export interface ManagementDeps {
   registry: ProviderRegistry;
   authStore: AuthStore;
@@ -24,6 +30,7 @@ export interface ManagementDeps {
   getLoginState?: () => LoginState;
   getBrowserStatus?: () => BrowserStatus;
   getBrowserEngine?: () => BrowserEngine;
+  getBrowserPool?: () => BrowserPoolCount;
   profiles?: ProfilesApi;
   startTime?: number;
   metrics?: MetricsCollector;
@@ -111,6 +118,7 @@ export function managementRoutes(deps: ManagementDeps): Hono {
   app.get('/webmodel/health', async (c) => {
     const statuses = await registry.providerStatus();
     const browserStatus = deps.getBrowserStatus ? deps.getBrowserStatus() : 'stopped';
+    const pool = deps.getBrowserPool?.();
     return c.json({
       status: 'healthy',
       uptime: Math.floor((Date.now() - routeStartTime) / 1000),
@@ -118,6 +126,7 @@ export function managementRoutes(deps: ManagementDeps): Hono {
         status: browserStatus,
         engine: deps.getBrowserEngine?.() ?? 'chrome',
         profile: deps.profiles?.active() ?? DEFAULT_PROFILE,
+        ...(pool ? { liveBrowsers: pool.live, maxLiveBrowsers: pool.max } : {}),
       },
       providers: Object.fromEntries(
         statuses.map(s => [s.id, { authenticated: s.authenticated, models: s.modelCount }])

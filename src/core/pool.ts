@@ -16,6 +16,8 @@ interface Member extends PoolMember {
   out: boolean;
   /** One call per account: its browser tab is the scarce resource. */
   busy: boolean;
+  /** Chat attempts served, for the per-account hourly cap and the ban measurement. */
+  recent: number[];
 }
 
 type ErrorEvent = Extract<StreamEvent, { type: 'error' }>;
@@ -29,6 +31,12 @@ export interface PoolRefusal {
   at: string;
 }
 
+/** Notified around each attempt so the browser layer knows which account is in use. */
+export interface PoolHooks {
+  onAcquire?: (member: PoolMember) => void;
+  onRelease?: (member: PoolMember) => void;
+}
+
 // The account turned the message down, so another account can take it without a duplicate.
 // `challenge_required` belongs here: DeepSeek answered with a challenge instead of running
 // the completion, so nothing was posted. The challenge flags the IP, not the account, so it
@@ -38,6 +46,9 @@ const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit'
 // Cooldown per account after "too frequent": doubles from 5 s up to 10 min, like the route's.
 const FIRST_WAIT_MS = 5_000;
 const CAP_MS = 600_000;
+// 2026-11-06: the accounts that died served ~19 requests in 25 minutes (~45/h) and were
+// challenged after ~2 minutes. The cap defaults to 10/h per account; 0 disables it.
+const HOUR_MS = 3_600_000;
 // A closed session costs ~10 s to find (page reload + bearer wait). Probed again after this,
 // so a re-login typed into the account's own window is still picked up.
 const LOGGED_OUT_RECHECK_MS = 300_000;
@@ -61,11 +72,13 @@ export class ProviderPool extends BaseProvider {
     members: PoolMember[],
     private readonly here?: BaseProvider,
     private readonly onRefusal?: (refusal: PoolRefusal) => void,
+    private readonly maxPerHour = 0,
+    private readonly hooks?: PoolHooks,
   ) {
     super();
     if (members.length === 0) throw new Error('A provider pool needs at least one account.');
     this.info = members[0].provider.info;
-    this.members = members.map(m => ({ ...m, mutedUntil: 0, coolUntil: 0, coolWait: 0, loggedOutUntil: 0, out: false, busy: false }));
+    this.members = members.map(m => ({ ...m, mutedUntil: 0, coolUntil: 0, coolWait: 0, loggedOutUntil: 0, out: false, busy: false, recent: [] }));
   }
 
   // ponytail: login only opens the provider's URL; the CLI runs it on the active profile.
@@ -98,6 +111,7 @@ export class ProviderPool extends BaseProvider {
       let refusal: ErrorEvent | null = null;
       try {
         if (req.signal?.aborted) return;
+        this.record(member);
         log(`${this.info.id} → ${member.name}`);
         let produced = false;
         for await (const event of member.provider.chat(req)) {
@@ -107,6 +121,7 @@ export class ProviderPool extends BaseProvider {
         }
       } finally {
         member.busy = false;
+        this.hooks?.onRelease?.(member);
         this.freed.splice(0).forEach(wake => wake());
       }
       if (!refusal) { member.coolWait = 0; return; }
@@ -133,21 +148,60 @@ export class ProviderPool extends BaseProvider {
       for (let i = 0; i < this.members.length; i++) {
         const index = (start + i) % this.members.length;
         const m = this.members[index];
-        if (tried.has(m) || m.mutedUntil > now || m.coolUntil > now) continue;
-        // Logged out is the account's own auth state, so a dashboard login brings it back.
-        if (!(await m.provider.isAuthenticated())) continue;
-        // DeepSeek lets `expired` through isAuthenticated(); a dashboard login reads logged in here.
-        if (m.loggedOutUntil > now && !(await m.provider.isLoggedInHere())) continue;
+        if (tried.has(m) || !(await this.free(m, now))) continue;
         // After the await: a concurrent call may have taken it meanwhile.
         if (m.busy) { busy = true; continue; }
         m.busy = true;
         this.cursor = index + 1;
         if (m.out) { m.out = false; log(`${m.name} back in turn`); }
+        this.hooks?.onAcquire?.(m);
         return m;
       }
       if (!busy) return undefined;
       await new Promise<void>(wake => this.freed.push(wake));
     }
+  }
+
+  /**
+   * The account the next call would take, without taking it, moving the cursor or
+   * waiting for a busy one. Used to warm its browser ahead of its turn.
+   */
+  async peekNext(): Promise<PoolMember | undefined> {
+    const now = Date.now();
+    const start = this.cursor;
+    for (let i = 0; i < this.members.length; i++) {
+      const m = this.members[(start + i) % this.members.length];
+      if (m.busy || !(await this.free(m, now))) continue;
+      return m;
+    }
+    return undefined;
+  }
+
+  /** In turn and able to serve right now: authenticated, not cooling, muted or capped. */
+  private async free(m: Member, now: number): Promise<boolean> {
+    if (m.mutedUntil > now || m.coolUntil > now) return false;
+    if (this.overLimit(m, now)) return false;
+    // Logged out is the account's own auth state, so a dashboard login brings it back.
+    if (!(await m.provider.isAuthenticated())) return false;
+    // DeepSeek lets `expired` through isAuthenticated(); a dashboard login reads logged in here.
+    if (m.loggedOutUntil > now && !(await m.provider.isLoggedInHere())) return false;
+    return true;
+  }
+
+  private record(m: Member): void {
+    const now = Date.now();
+    m.recent.push(now);
+    m.recent = m.recent.filter(t => t > now - HOUR_MS);
+    if (this.maxPerHour > 0 && m.recent.length === this.maxPerHour) {
+      log(`${m.name} hit the hourly cap (${this.maxPerHour}/h)`);
+    }
+  }
+
+  /** True when the account has no slot left in the last hour; prunes the window. */
+  private overLimit(m: Member, now: number): boolean {
+    if (this.maxPerHour <= 0) return false;
+    m.recent = m.recent.filter(t => t > now - HOUR_MS);
+    return m.recent.length >= this.maxPerHour;
   }
 
   private markOut(m: Member, refusal: ErrorEvent): void {
@@ -163,15 +217,26 @@ export class ProviderPool extends BaseProvider {
       m.coolUntil = Date.now() + m.coolWait;
       log(`${m.name} out: too frequent, cooling ${m.coolWait / 1000}s`);
     } else {
-      m.loggedOutUntil = Date.now() + LOGGED_OUT_RECHECK_MS;
-      log(`${m.name} out: logged out, next check in ${LOGGED_OUT_RECHECK_MS / 1000}s`);
+      const now = Date.now();
+      const inHour = m.recent.filter(t => t > now - HOUR_MS).length;
+      const inTen = m.recent.filter(t => t > now - 600_000).length;
+      m.loggedOutUntil = now + LOGGED_OUT_RECHECK_MS;
+      log(`${m.name} out: logged out after ${inHour} req/1h (${inTen}/10m), next check in ${LOGGED_OUT_RECHECK_MS / 1000}s`);
     }
   }
 
-  /** Every account is out. Cooling wins (it clears soonest), then logged out, then muted. */
+  /** Every account is out. The hourly cap wins: it clears at a known time. */
   private allDown(): ErrorEvent {
     const now = Date.now();
     const name = this.info.name;
+    if (this.maxPerHour > 0) {
+      const capped = this.members.filter(m => this.overLimit(m, now));
+      if (capped.length === this.members.length) {
+        const firstFree = Math.min(...this.members.map(m => (m.recent[0] ?? now) + HOUR_MS));
+        const wait = Math.max(1, Math.ceil((firstFree - now) / 1000));
+        return { type: 'error', code: 'hourly_limit', message: `${name}: every account hit the hourly limit (${this.maxPerHour}/h); the first frees in ${wait}s` };
+      }
+    }
     const cooling = this.members.filter(m => m.coolUntil > now);
     if (cooling.length > 0) {
       const wait = Math.ceil((Math.min(...cooling.map(m => m.coolUntil)) - now) / 1000);

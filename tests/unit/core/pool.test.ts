@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ProviderPool } from '../../../src/core/pool.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 
@@ -97,5 +97,140 @@ describe('ProviderPool turn', () => {
     const capture = () => [{ type: 'error' as const, message: 'captcha', code: 'challenge_required', possiblySent: true }];
     const out = await drain(poolOf([fakeAccount('a', capture), fakeAccount('b', capture)]));
     expect(out).toEqual([{ type: 'error', message: 'captcha', code: 'challenge_required', possiblySent: true }]);
+  });
+});
+
+describe('ProviderPool hourly cap', () => {
+  const cappedPool = (accounts: ReturnType<typeof fakeAccount>[], maxPerHour: number) =>
+    new ProviderPool(accounts.map(a => ({ name: a.name, provider: a.provider })), undefined, undefined, maxPerHour);
+
+  it('benches an account at the cap and reports it when every account is capped', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = fakeAccount('a');
+      const b = fakeAccount('b');
+      const pool = cappedPool([a, b], 1);
+
+      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
+      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
+      expect(a.runs).toHaveLength(1);
+      expect(b.runs).toHaveLength(1);
+
+      expect(await drain(pool)).toEqual([
+        { type: 'error', code: 'hourly_limit', message: expect.stringContaining('hourly limit') },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets an account back in once its oldest request leaves the hour', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = fakeAccount('a');
+      const pool = cappedPool([a], 1);
+      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
+      expect((await drain(pool)).at(-1)).toMatchObject({ type: 'error', code: 'hourly_limit' });
+
+      vi.advanceTimersByTime(3_600_001);
+      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
+      expect(a.runs).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('ProviderPool callbacks', () => {
+  it('reports every attempted account as acquired and released, even across a refusal', async () => {
+    const events: string[] = [];
+    const a = fakeAccount('a', () => [{ type: 'error', message: 'closed', code: 'auth_expired' }]);
+    const b = fakeAccount('b');
+    const pool = new ProviderPool(
+      [a, b].map(acc => ({ name: acc.name, provider: acc.provider })),
+      undefined,
+      undefined,
+      0,
+      {
+        onAcquire: member => events.push(`acquire ${member.name}`),
+        onRelease: member => events.push(`release ${member.name}`),
+      },
+    );
+
+    await drain(pool);
+
+    expect(events).toEqual(['acquire a', 'release a', 'acquire b', 'release b']);
+  });
+
+  it('releases the account when the request is aborted before it runs', async () => {
+    const events: string[] = [];
+    const a = fakeAccount('a');
+    const pool = new ProviderPool(
+      [{ name: a.name, provider: a.provider }],
+      undefined,
+      undefined,
+      0,
+      {
+        onAcquire: member => events.push(`acquire ${member.name}`),
+        onRelease: member => events.push(`release ${member.name}`),
+      },
+    );
+    const abort = new AbortController();
+    abort.abort();
+
+    const out: StreamEvent[] = [];
+    const req = {
+      model: 'deepseek-v4',
+      messages: [{ role: 'user' as const, content: 'hi' }],
+      stream: true,
+      signal: abort.signal,
+    };
+    for await (const event of pool.chat(req)) out.push(event);
+
+    expect(out).toEqual([]);
+    expect(a.runs).toHaveLength(0);
+    expect(events).toEqual(['acquire a', 'release a']);
+  });
+});
+
+describe('ProviderPool peek', () => {
+  it('returns the account the next call would take without taking it', async () => {
+    const pool = poolOf([fakeAccount('a'), fakeAccount('b')]);
+
+    expect((await pool.peekNext())?.name).toBe('a');
+    expect((await pool.peekNext())?.name).toBe('a');
+
+    await drain(pool);
+    expect((await pool.peekNext())?.name).toBe('b');
+  });
+
+  it('skips an account that cannot authenticate', async () => {
+    const a = fakeAccount('a');
+    a.provider.isAuthenticated = async () => false;
+    const pool = poolOf([a, fakeAccount('b')]);
+
+    expect((await pool.peekNext())?.name).toBe('b');
+  });
+
+  it('returns nothing while every account is busy', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const [a, b] = [fakeAccount('a'), fakeAccount('b')];
+    for (const acc of [a, b]) {
+      acc.provider.chat = async function* () {
+        acc.runs.push(Date.now());
+        await gate;
+        yield ok[0];
+        yield ok[1];
+      };
+    }
+    const pool = poolOf([a, b]);
+    const both = Promise.all([drain(pool), drain(pool)]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    expect(await pool.peekNext()).toBeUndefined();
+
+    release();
+    await both;
   });
 });
