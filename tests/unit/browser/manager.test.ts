@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Browser, BrowserContext } from 'playwright-core';
 import {
   BrowserManager,
+  apostateLaunchOptions,
   profileSeed,
   type ActiveProfile,
   type BrowserManagerOptions,
@@ -173,6 +174,20 @@ describe('BrowserManager profiles', () => {
     await expect(profileSeed(dir)).resolves.toBe(seed);
     writeFileSync(join(dir, '.apostate-seed'), 'garbage');
     await expect(profileSeed(dir)).resolves.not.toBeNaN();
+  });
+
+  it('asks Apostate for its seeded readback noise, so canvas and WebGL differ per profile', () => {
+    const host = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
+
+    expect(apostateLaunchOptions(27642, true, 30000)).toEqual({
+      fingerprint: 27642,
+      fingerprintPlatform: host,
+      headless: true,
+      timeout: 30000,
+      // Off by default in the binary. Without it every profile renders the
+      // host's canvas and WebGL pixels byte for byte.
+      args: ['--fingerprint-noise'],
+    });
   });
 
   it('launches camoufox when attach mode is requested', async () => {

@@ -169,6 +169,24 @@ export async function profileSeed(profileDir: string): Promise<number> {
   return seed;
 }
 
+/**
+ * Apostate's readback noise is off by default, and without it canvas 2D and
+ * WebGL readPixels return the host's real pixels: byte-identical to plain
+ * Chrome and to every other profile, while the declared GPU string differs per
+ * seed. That is a spoofing tell, and it clusters every profile as one device.
+ * The flag is seeded, so noise stays stable on every read and across launches
+ * for one profile, and differs between profiles. It does not cover audio.
+ */
+export function apostateLaunchOptions(seed: number, headless: boolean, timeout: number): Record<string, unknown> {
+  return {
+    fingerprint: seed,
+    fingerprintPlatform: HOST_OS,
+    headless,
+    timeout,
+    args: ['--fingerprint-noise'],
+  };
+}
+
 async function launchApostateContext(options: BrowserLaunchOptions): Promise<BrowserContext> {
   let launchPersistentContext: (userDataDir: string, opts: Record<string, unknown>) => Promise<BrowserContext>;
   try {
@@ -182,13 +200,11 @@ async function launchApostateContext(options: BrowserLaunchOptions): Promise<Bro
     );
   }
   // Fully open source (GPL-3.0). It passed DeepSeek's hCaptcha and finished
-  // the login (2026-10-29). Canvas/audio noise stays off: it is detectable.
-  return launchPersistentContext(options.profileDir, {
-    fingerprint: await profileSeed(options.profileDir),
-    fingerprintPlatform: HOST_OS,
-    headless: options.headless,
-    timeout: options.timeout,
-  });
+  // the login (2026-10-29).
+  return launchPersistentContext(
+    options.profileDir,
+    apostateLaunchOptions(await profileSeed(options.profileDir), options.headless, options.timeout),
+  );
 }
 
 const defaultLaunchers: Record<BrowserEngine, BrowserLauncher> = {
