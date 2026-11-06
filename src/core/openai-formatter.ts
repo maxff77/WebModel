@@ -11,6 +11,12 @@ interface ChatCompletionChunk {
     delta: Record<string, unknown>;
     finish_reason: string | null;
   }>;
+  /** A provider failure must reach the client; an empty chunk hides it. */
+  error?: {
+    message: string;
+    type: 'provider_error';
+    code?: string;
+  };
 }
 
 export function formatStreamChunk(
@@ -27,7 +33,9 @@ export function formatStreamChunk(
     choices: [{ index: 0, delta: {}, finish_reason: null }],
   };
 
-  if (event.type === 'text_delta') {
+  if (event.type === 'error') {
+    base.error = { message: event.message, type: 'provider_error', ...(event.code ? { code: event.code } : {}) };
+  } else if (event.type === 'text_delta') {
     base.choices[0].delta = isFirst
       ? { role: 'assistant', content: event.delta }
       : { content: event.delta };

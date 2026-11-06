@@ -1,6 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createTestContext, type TestContext } from '../../helpers/test-server.js';
 import { MockProvider } from '../../helpers/mock-provider.js';
+import type { StreamEvent } from '../../../src/core/stream.js';
+
+class ErrorProvider extends MockProvider {
+  async *chat(): AsyncIterable<StreamEvent> {
+    yield { type: 'error', message: 'session closed', code: 'auth_expired' };
+  }
+}
 
 describe('POST /v1/chat/completions', () => {
   let ctx: TestContext;
@@ -23,6 +30,24 @@ describe('POST /v1/chat/completions', () => {
     expect(text).toContain('data: {');
     expect(text).toContain('"object":"chat.completion.chunk"');
     expect(text).toContain('Hello from claude-web');
+    expect(text).toContain('data: [DONE]');
+  });
+
+  it('streams a provider error instead of an empty completion', async () => {
+    ctx = createTestContext({ providers: [new ErrorProvider('claude-web')] });
+    const res = await ctx.app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-web/claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'Hi' }],
+        stream: true,
+      }),
+    });
+    const text = await res.text();
+    expect(text).toContain('"error"');
+    expect(text).toContain('session closed');
+    expect(text).toContain('auth_expired');
     expect(text).toContain('data: [DONE]');
   });
 

@@ -54,6 +54,12 @@ describe('OpenAI Formatter', () => {
       const chunk = formatStreamChunk('run-1', modelId, event, false);
       expect(chunk.choices[0].finish_reason).toBe('tool_calls');
     });
+
+    it('carries an error event instead of dropping it', () => {
+      const event: StreamEvent = { type: 'error', message: 'session closed', code: 'auth_expired' };
+      const chunk = formatStreamChunk('run-1', modelId, event, false);
+      expect(chunk.error).toEqual({ message: 'session closed', type: 'provider_error', code: 'auth_expired' });
+    });
   });
 
   describe('formatDoneChunk', () => {
