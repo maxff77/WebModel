@@ -16,7 +16,7 @@ interface Member extends PoolMember {
   out: boolean;
   /** One call per account: its browser tab is the scarce resource. */
   busy: boolean;
-  /** Chat attempts served, for the per-account hourly cap and the ban measurement. */
+  /** Chat attempts served, for the ban measurement. */
   recent: number[];
 }
 
@@ -47,7 +47,7 @@ const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit'
 const FIRST_WAIT_MS = 5_000;
 const CAP_MS = 600_000;
 // 2026-11-06: the accounts that died served ~19 requests in 25 minutes (~45/h) and were
-// challenged after ~2 minutes. The cap defaults to 10/h per account; 0 disables it.
+// challenged after ~2 minutes. Kept as a ban measurement, not as a cap (removed 2026-11-06).
 const HOUR_MS = 3_600_000;
 // A closed session costs ~10 s to find (page reload + bearer wait). Probed again after this,
 // so a re-login typed into the account's own window is still picked up.
@@ -72,7 +72,6 @@ export class ProviderPool extends BaseProvider {
     members: PoolMember[],
     private readonly here?: BaseProvider,
     private readonly onRefusal?: (refusal: PoolRefusal) => void,
-    private readonly maxPerHour = 0,
     private readonly hooks?: PoolHooks,
   ) {
     super();
@@ -177,10 +176,9 @@ export class ProviderPool extends BaseProvider {
     return undefined;
   }
 
-  /** In turn and able to serve right now: authenticated, not cooling, muted or capped. */
+  /** In turn and able to serve right now: authenticated, not cooling or muted. */
   private async free(m: Member, now: number): Promise<boolean> {
     if (m.mutedUntil > now || m.coolUntil > now) return false;
-    if (this.overLimit(m, now)) return false;
     // Logged out is the account's own auth state, so a dashboard login brings it back.
     if (!(await m.provider.isAuthenticated())) return false;
     // DeepSeek lets `expired` through isAuthenticated(); a dashboard login reads logged in here.
@@ -192,16 +190,6 @@ export class ProviderPool extends BaseProvider {
     const now = Date.now();
     m.recent.push(now);
     m.recent = m.recent.filter(t => t > now - HOUR_MS);
-    if (this.maxPerHour > 0 && m.recent.length === this.maxPerHour) {
-      log(`${m.name} hit the hourly cap (${this.maxPerHour}/h)`);
-    }
-  }
-
-  /** True when the account has no slot left in the last hour; prunes the window. */
-  private overLimit(m: Member, now: number): boolean {
-    if (this.maxPerHour <= 0) return false;
-    m.recent = m.recent.filter(t => t > now - HOUR_MS);
-    return m.recent.length >= this.maxPerHour;
   }
 
   private markOut(m: Member, refusal: ErrorEvent): void {
@@ -225,18 +213,10 @@ export class ProviderPool extends BaseProvider {
     }
   }
 
-  /** Every account is out. The hourly cap wins: it clears at a known time. */
+  /** Every account is out. A cooling window clears at a known time. */
   private allDown(): ErrorEvent {
     const now = Date.now();
     const name = this.info.name;
-    if (this.maxPerHour > 0) {
-      const capped = this.members.filter(m => this.overLimit(m, now));
-      if (capped.length === this.members.length) {
-        const firstFree = Math.min(...this.members.map(m => (m.recent[0] ?? now) + HOUR_MS));
-        const wait = Math.max(1, Math.ceil((firstFree - now) / 1000));
-        return { type: 'error', code: 'hourly_limit', message: `${name}: every account hit the hourly limit (${this.maxPerHour}/h); the first frees in ${wait}s` };
-      }
-    }
     const cooling = this.members.filter(m => m.coolUntil > now);
     if (cooling.length > 0) {
       const wait = Math.ceil((Math.min(...cooling.map(m => m.coolUntil)) - now) / 1000);

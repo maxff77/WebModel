@@ -351,11 +351,9 @@ program
         const auth = new AuthStore(stateDir, () => name);
         return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserPageFor(name, origin)) };
       });
-      const capRaw = Number(process.env.WMB_ACCOUNT_MAX_PER_HOUR ?? 10);
-      const hourlyCap = Number.isFinite(capRaw) && capRaw >= 0 ? capRaw : 10;
       let pool: ProviderPool | undefined;
       if (members.length > 0) {
-        pool = new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')), hourlyCap, {
+        pool = new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')), {
           onAcquire: (member) => {
             liveBrowsers.hold(member.name);
             // Warm the account the next call will take while this one streams.

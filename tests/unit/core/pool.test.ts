@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ProviderPool } from '../../../src/core/pool.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 
@@ -100,47 +100,6 @@ describe('ProviderPool turn', () => {
   });
 });
 
-describe('ProviderPool hourly cap', () => {
-  const cappedPool = (accounts: ReturnType<typeof fakeAccount>[], maxPerHour: number) =>
-    new ProviderPool(accounts.map(a => ({ name: a.name, provider: a.provider })), undefined, undefined, maxPerHour);
-
-  it('benches an account at the cap and reports it when every account is capped', async () => {
-    vi.useFakeTimers();
-    try {
-      const a = fakeAccount('a');
-      const b = fakeAccount('b');
-      const pool = cappedPool([a, b], 1);
-
-      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
-      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
-      expect(a.runs).toHaveLength(1);
-      expect(b.runs).toHaveLength(1);
-
-      expect(await drain(pool)).toEqual([
-        { type: 'error', code: 'hourly_limit', message: expect.stringContaining('hourly limit') },
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('lets an account back in once its oldest request leaves the hour', async () => {
-    vi.useFakeTimers();
-    try {
-      const a = fakeAccount('a');
-      const pool = cappedPool([a], 1);
-      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
-      expect((await drain(pool)).at(-1)).toMatchObject({ type: 'error', code: 'hourly_limit' });
-
-      vi.advanceTimersByTime(3_600_001);
-      expect((await drain(pool)).at(-1)).toEqual({ type: 'done', reason: 'stop' });
-      expect(a.runs).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
 describe('ProviderPool callbacks', () => {
   it('reports every attempted account as acquired and released, even across a refusal', async () => {
     const events: string[] = [];
@@ -150,7 +109,6 @@ describe('ProviderPool callbacks', () => {
       [a, b].map(acc => ({ name: acc.name, provider: acc.provider })),
       undefined,
       undefined,
-      0,
       {
         onAcquire: member => events.push(`acquire ${member.name}`),
         onRelease: member => events.push(`release ${member.name}`),
@@ -169,7 +127,6 @@ describe('ProviderPool callbacks', () => {
       [{ name: a.name, provider: a.provider }],
       undefined,
       undefined,
-      0,
       {
         onAcquire: member => events.push(`acquire ${member.name}`),
         onRelease: member => events.push(`release ${member.name}`),
