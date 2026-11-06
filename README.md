@@ -170,6 +170,11 @@ providers:
     - deepseek-web
     - qwen-web
 
+deepseek:
+  profiles: []         # Accounts in turn. More accounts spread the load and give
+                       # failover; they do NOT raise throughput — the pacing gate is
+                       # per IP, so it caps the rate whatever the account count.
+
 logging:
   level: info
 ```

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DeepSeekProvider } from '../../../src/providers/deepseek/index.js';
+import { mainWorldScript } from '../../../src/providers/deepseek/challenge.js';
 import { DEEPSEEK_DEVICE_ID_KEY } from '../../../src/providers/deepseek/client.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 import { AuthStore } from '../../../src/auth/store.js';
@@ -19,6 +20,7 @@ const powReply = { challenge: { algorithm: 'sha256', challenge: 'c', difficulty:
 // bearer the real page sends after a reload.
 function fakePage(replies: unknown[]) {
   const handlers: Array<(req: any) => void> = [];
+  const calls: any[] = [];
   let reloads = 0;
   const page = {
     on: (event: string, h: (req: any) => void) => { if (event === 'request') handlers.push(h); },
@@ -33,11 +35,20 @@ function fakePage(replies: unknown[]) {
         headers: () => ({ authorization: 'Bearer from-page' }),
       });
     },
-    // The device-id read is the only evaluate with the localStorage key as its arg.
-    evaluate: async (_fn: unknown, arg?: unknown) =>
-      arg === DEEPSEEK_DEVICE_ID_KEY ? 'test-device' : replies.shift(),
+    addScriptTag: async () => {},
+    bringToFront: async () => {},
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      // The device-id read is the only evaluate with the localStorage key as its arg.
+      if (arg === DEEPSEEK_DEVICE_ID_KEY) return 'test-device';
+      // hCaptcha result polling: the id the main-world script writes its result into.
+      if (typeof arg === 'string' && arg.startsWith('wmb-challenge-')) {
+        return JSON.stringify({ token: 'hcaptcha-token' });
+      }
+      calls.push(arg);
+      return replies.shift();
+    },
   };
-  return { page, reloads: () => reloads };
+  return { page, reloads: () => reloads, calls };
 }
 
 // A capture checks and refreshes the login mark; these tests start logged in.
@@ -61,6 +72,45 @@ async function events(provider: DeepSeekProvider): Promise<StreamEvent[]> {
   return out;
 }
 
+describe('hCaptcha main-world script', () => {
+  it('applies rqdata with setData after render, never in render options', async () => {
+    const script = mainWorldScript(
+      'wmb-test',
+      JSON.stringify({ sitekey: 'site-key', rqdata: 'v2:abc' }),
+    );
+    const elements: any[] = [];
+    const document = {
+      createElement: (tag: string) => ({ tag, style: {}, textContent: '', appendChild() {}, setAttribute() {} }),
+      body: { appendChild: (el: any) => { elements.push(el); } },
+      head: { appendChild() {} },
+    };
+    const calls: { render?: any; setData?: any; execute?: any } = {};
+    const window: any = {
+      hcaptcha: {
+        render: (_el: any, opts: any) => { calls.render = opts; return 42; },
+        setData: (id: number, data: any) => { calls.setData = { id, data }; },
+        execute: (id: number, opts: any) => {
+          calls.execute = { id, opts };
+          return Promise.resolve({ response: 'token-1' });
+        },
+      },
+    };
+
+    new Function('window', 'document', script)(window, document);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // hCaptcha's render() whitelist drops rqdata; setData() is what attaches it.
+    expect(calls.render).toMatchObject({ sitekey: 'site-key', size: 'invisible' });
+    expect(calls.render).not.toHaveProperty('rqdata');
+    expect(calls.setData).toEqual({ id: 42, data: { rqdata: 'v2:abc' } });
+    expect(calls.execute).toEqual({ id: 42, opts: { async: true } });
+
+    const out = elements.find((el) => el.id === 'wmb-test');
+    expect(JSON.parse(out.textContent)).toEqual({ token: 'token-1' });
+  });
+});
+
 describe('DeepSeekProvider.chat SSE handling', () => {
   it('reports the rate-limit hint as an upstream_rate_limit error instead of an empty reply', async () => {
     // Captured verbatim from chat.deepseek.com when requests come too fast.
@@ -70,6 +120,24 @@ describe('DeepSeekProvider.chat SSE handling', () => {
     expect(await events(providerWithSse(sse))).toEqual([
       { type: 'error', message: 'DeepSeek: Messages too frequent. Try again later.', code: 'upstream_rate_limit', possiblySent: true },
     ]);
+  });
+
+  // The gate must react to "too frequent" itself, not wait for the escalation to a challenge.
+  it('holds the next call after a rate-limit refusal', async () => {
+    const sse = 'event: hint\ndata: {"type":"error","content":"Messages too frequent. Try again later.","finish_reason":"rate_limit_reached"}\n\n';
+    await events(providerWithSse(sse));
+    const t0 = Date.now();
+    await events(providerWithSse('data: {"p":"response/status","v":"FINISHED"}\n\n'));
+    // The hold comes from WMB_RATE_LIMIT_BACKOFF_MS, pinned in vitest.config.ts.
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100);
+  });
+
+  it('holds the next call when "too frequent" arrives as a plain body, not an SSE hint', async () => {
+    // Shape is a guess (not captured); the test only needs "not SSE" with the phrase.
+    await events(providerWithSse('{"code":42900,"msg":"Messages too frequent. Try again later.","data":null}'));
+    const t0 = Date.now();
+    await events(providerWithSse('data: {"p":"response/status","v":"FINISHED"}\n\n'));
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100);
   });
 
   it('marks a non-rate-limit refusal hint as possibly sent so it is not re-posted', async () => {
@@ -95,6 +163,27 @@ describe('DeepSeekProvider.chat SSE handling', () => {
     expect(await events(providerWithSse(body))).toEqual([
       { type: 'error', message: 'DeepSeek: account muted until 2026-10-27T18:38:15.460Z', code: 'account_muted', until: 1793126295460, possiblySent: true },
     ]);
+  });
+
+  it('solves a CHALLENGE_REQUIRED hCaptcha and replays the completion with its token', async () => {
+    // Body captured from chat.deepseek.com on 2026-11-03 (extras.rqdata cut here).
+    const body = '{"code":40303,"msg":"CHALLENGE_REQUIRED","data":{"provider":"hcaptcha","challenge_id":"ch-1","extras":{"rqdata":"v2:abc"}}}';
+    const sse = 'data: {"p":"response/content","v":"ok"}\n\ndata: {"p":"response/status","v":"FINISHED"}\n\n';
+    const { page, calls } = fakePage([{ data: createReply }, powReply, { data: body }, { data: sse }]);
+    const provider = new DeepSeekProvider(loggedIn as any, undefined, async () => page as any);
+    provider.setBearerToken('test');
+
+    expect(await events(provider)).toEqual([
+      { type: 'text_delta', delta: 'ok' },
+      { type: 'done', reason: 'stop' },
+    ]);
+
+    // The web client replays the same request plus this base64 header.
+    const expected = Buffer.from(JSON.stringify({
+      provider: 'hcaptcha', challenge_id: 'ch-1', hcaptcha_token: 'hcaptcha-token',
+    })).toString('base64');
+    expect(calls[3].headers['x-ds-challenge-response']).toBe(expected);
+    expect(calls[3].sessionId).toBe('session-1');
   });
 
   it('still streams normal content', async () => {

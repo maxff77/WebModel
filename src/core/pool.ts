@@ -30,7 +30,10 @@ export interface PoolRefusal {
 }
 
 // The account turned the message down, so another account can take it without a duplicate.
-const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit']);
+// `challenge_required` belongs here: DeepSeek answered with a challenge instead of running
+// the completion, so nothing was posted. The challenge flags the IP, not the account, so it
+// does not bench the account (2026-11-05).
+const REFUSALS = new Set(['account_muted', 'auth_expired', 'upstream_rate_limit', 'challenge_required']);
 
 // Cooldown per account after "too frequent": doubles from 5 s up to 10 min, like the route's.
 const FIRST_WAIT_MS = 5_000;
@@ -89,6 +92,7 @@ export class ProviderPool extends BaseProvider {
 
   async *chat(req: ChatRequest): AsyncIterable<StreamEvent> {
     const tried = new Set<Member>();
+    let challengeRefusal: ErrorEvent | null = null;
     for (let member = await this.next(tried); member; member = await this.next(tried)) {
       tried.add(member);
       let refusal: ErrorEvent | null = null;
@@ -106,6 +110,7 @@ export class ProviderPool extends BaseProvider {
         this.freed.splice(0).forEach(wake => wake());
       }
       if (!refusal) { member.coolWait = 0; return; }
+      if (refusal.code === 'challenge_required') challengeRefusal = refusal;
       this.markOut(member, refusal);
       this.onRefusal?.({
         profile: member.name,
@@ -114,7 +119,8 @@ export class ProviderPool extends BaseProvider {
         at: new Date().toISOString(),
       });
     }
-    yield this.allDown();
+    // A challenge is the actionable truth; "logged out" is only the by-elimination guess.
+    yield challengeRefusal ?? this.allDown();
   }
 
   /** First account free from the cursor on, taken busy; the next call starts after it. All busy: waits. */
@@ -145,6 +151,8 @@ export class ProviderPool extends BaseProvider {
   }
 
   private markOut(m: Member, refusal: ErrorEvent): void {
+    // A challenge flags the IP, not the account: it stays in the turn.
+    if (refusal.code === 'challenge_required') return;
     m.out = true;
     if (refusal.code === 'account_muted') {
       // No end date: out until restart.

@@ -2,6 +2,8 @@ import { BaseProvider, type ProviderInfo, type ModelInfo, type ChatRequest, buil
 import type { StreamEvent } from '../../core/stream.js';
 
 import { solvePow, buildPowResponse, type DeepSeekPowChallenge } from './pow.js';
+import { CHALLENGE_RESPONSE_HEADER, hcaptchaChallenge, solveHcaptcha } from './challenge.js';
+import { createPacer, type BackoffReason } from './pacing.js';
 import {
   DEEPSEEK_WEB_BASE_URL,
   DEEPSEEK_DEVICE_ID_KEY,
@@ -10,6 +12,26 @@ import {
 } from './client.js';
 import { AuthStore } from '../../auth/store.js';
 import type { Page } from 'playwright-core';
+
+// DeepSeek scores the whole IP: bursts get CHALLENGE_REQUIRED and then every
+// session is closed (2026-11-04). One gate for all accounts in this process.
+const envNum = (raw: string | undefined, fallback: number): number => {
+  const n = Number(raw);
+  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+const pace = createPacer(
+  () => envNum(process.env.WMB_MIN_GAP_MS, 6_000),
+  {
+    jitter: Math.min(envNum(process.env.WMB_GAP_JITTER, 0.25), 1),
+    challengeBackoffMs: () => envNum(process.env.WMB_CHALLENGE_BACKOFF_MS, 60_000),
+    rateLimitBackoffMs: () => envNum(process.env.WMB_RATE_LIMIT_BACKOFF_MS, 30_000),
+  },
+);
+/** Holds every account — the gate is process-wide — and says why. */
+const holdAll = (id: string, reason: BackoffReason, note: string): void => {
+  const hold = pace.backOff(reason);
+  console.warn(`[${id}] ${new Date().toISOString()} ${note}, all accounts hold ${hold / 1000}s`);
+};
 
 /** HTTP 200 envelope DeepSeek wraps every reply in. */
 interface SessionCreateEnvelope {
@@ -125,6 +147,8 @@ export class DeepSeekProvider extends BaseProvider {
     let possiblySent = false;
 
     try {
+      await pace.start();
+      if (req.signal?.aborted) return;
       const page = await this.getPage(DEEPSEEK_WEB_BASE_URL);
       let clientHeaders = this.clientHeaders;
       if (!clientHeaders) {
@@ -272,9 +296,11 @@ export class DeepSeekProvider extends BaseProvider {
 
       const isThinking = req.thinking || req.model.includes('reasoner');
 
-      // Step 6: Send message with PoW header, read SSE
+      // Step 6: Send message with PoW header, read SSE. A 40303 CHALLENGE_REQUIRED
+      // comes back as a 200 JSON body; the web client solves an hCaptcha and
+      // replays the same POST with x-ds-challenge-response (2026-11-03).
       possiblySent = true;
-      const sseResult = await page.evaluate(async (args: {
+      const sendCompletion = (extraHeaders: Record<string, string>) => page.evaluate(async (args: {
         sessionId: string; prompt: string; powResponse: string; thinkingEnabled: boolean;
         headers: Record<string, string>;
       }) => {
@@ -323,8 +349,26 @@ export class DeepSeekProvider extends BaseProvider {
         prompt,
         powResponse,
         thinkingEnabled: isThinking,
-        headers: apiHeaders,
+        headers: { ...apiHeaders, ...extraHeaders },
       });
+
+      let sseResult = await sendCompletion({});
+      const captchaChallenge = sseResult.error ? null : hcaptchaChallenge(sseResult.data ?? '');
+      if (captchaChallenge) {
+        // The risk engine just flagged the IP: hold every other account while this one answers.
+        holdAll(this.info.id, 'challenge', 'CHALLENGE_REQUIRED, solving hCaptcha');
+        const challengeResponse = await solveHcaptcha(page, captchaChallenge);
+        if (!challengeResponse) {
+          yield {
+            type: 'error',
+            message: 'DeepSeek: hCaptcha challenge was not solved. If it is showing in the bridge browser window, solve it and retry.',
+            code: 'challenge_required',
+            possiblySent,
+          };
+          return;
+        }
+        sseResult = await sendCompletion({ [CHALLENGE_RESPONSE_HEADER]: challengeResponse });
+      }
 
       if (sseResult.error) {
         this.forgetExpiredBearer(sseResult.error);
@@ -367,6 +411,12 @@ export class DeepSeekProvider extends BaseProvider {
         const body = (sseResult.data ?? '').trim().slice(0, 200) || '(empty body)';
         console.warn(`[${this.info.id}] ${new Date().toISOString()} completion was not a stream: ${body}`);
         this.forgetExpiredBearer(body);
+        // The answer to the challenge was refused: back off longer than the challenge itself.
+        if (/\b40304\b|CHALLENGE_FAILED/.test(body)) {
+          holdAll(this.info.id, 'challenge', 'challenge answer refused');
+        }
+        // DeepSeek sometimes says "too frequent" as an envelope instead of an SSE hint.
+        if (/too frequent/i.test(body)) holdAll(this.info.id, 'rate_limit', 'too frequent');
         // 2026-10-24: {"data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"mute_until":<epoch s>}}}, a multi-day sanction.
         const mutedUntil = /"is_muted":1/.test(body) ? Number(body.match(/"mute_until":([\d.]+)/)?.[1]) : NaN;
         if (mutedUntil > 0) {
@@ -412,6 +462,8 @@ export class DeepSeekProvider extends BaseProvider {
           // {"type":"error","content":"Messages too frequent...","finish_reason":"rate_limit_reached"}
           if (parsed?.type === 'error' && typeof parsed.content === 'string') {
             const code = parsed.finish_reason === 'rate_limit_reached' ? 'upstream_rate_limit' : parsed.finish_reason;
+            // The IP is already too hot: hold every account, not just the one that got the hint.
+            if (code === 'upstream_rate_limit') holdAll(this.info.id, 'rate_limit', 'too frequent');
             yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code, possiblySent };
             continue;
           }
@@ -439,6 +491,8 @@ export class DeepSeekProvider extends BaseProvider {
           } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'thinking_delta', delta: value };
           } else if (path === 'response/status' && (value === 'FINISHED' || value === 'DONE')) {
+            // A call came through: the rate-limit ladder starts over.
+            pace.ok();
             yield { type: 'done', reason: 'stop' };
           }
         } catch {
