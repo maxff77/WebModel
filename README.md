@@ -174,6 +174,8 @@ deepseek:
   profiles: []         # Accounts in turn. More accounts spread the load and give
                        # failover; they do NOT raise throughput — the pacing gate is
                        # per IP, so it caps the rate whatever the account count.
+                       # WMB_DEEPSEEK_TURN_BATCH (env, default 15) is how many calls
+                       # each account serves before the turn moves on; 1 = per-call turn.
 
 logging:
   level: info

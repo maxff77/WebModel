@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { ProviderPool } from '../../../src/core/pool.js';
+import { describe, it, expect, vi } from 'vitest';
+import { ProviderPool, type PoolHooks } from '../../../src/core/pool.js';
 import type { StreamEvent } from '../../../src/core/stream.js';
 
 const ok: StreamEvent[] = [
@@ -22,8 +22,8 @@ function fakeAccount(name: string, reply: () => StreamEvent[] = () => ok) {
   return { name, provider: provider as any, runs };
 }
 
-const poolOf = (accounts: ReturnType<typeof fakeAccount>[]) =>
-  new ProviderPool(accounts.map(a => ({ name: a.name, provider: a.provider })));
+const poolOf = (accounts: ReturnType<typeof fakeAccount>[], batchSize = 1, hooks?: PoolHooks) =>
+  new ProviderPool(accounts.map(a => ({ name: a.name, provider: a.provider })), undefined, undefined, hooks, batchSize);
 
 async function drain(pool: ProviderPool): Promise<StreamEvent[]> {
   const out: StreamEvent[] = [];
@@ -100,6 +100,100 @@ describe('ProviderPool turn', () => {
   });
 });
 
+describe('ProviderPool batch turn', () => {
+  it('serves N calls on one account before the turn moves on', async () => {
+    const order: string[] = [];
+    const named = (name: string) => {
+      const acc = fakeAccount(name);
+      const chat = acc.provider.chat;
+      acc.provider.chat = async function* (req: any) { order.push(name); yield* chat(req); };
+      return acc;
+    };
+    const pool = poolOf([named('a'), named('b'), named('c')], 3);
+
+    for (let i = 0; i < 6; i++) await drain(pool);
+
+    expect(order).toEqual(['a', 'a', 'a', 'b', 'b', 'b']);
+  });
+
+  it('overflows to another free account without moving the batch turn', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const a = fakeAccount('a');
+    const aChat = a.provider.chat;
+    a.provider.chat = async function* (req: any) { await gate; yield* aChat(req); };
+    const order: string[] = [];
+    let acquired!: () => void;
+    const firstAcquired = new Promise<void>(resolve => { acquired = resolve; });
+    const pool = poolOf([a, fakeAccount('b'), fakeAccount('c')], 3, {
+      onAcquire: member => { order.push(member.name); if (member.name === 'a') acquired(); },
+    });
+
+    const held = drain(pool);
+    await firstAcquired;
+    await drain(pool); // a is busy: this call overflows to b
+    release();
+    await held;
+    await drain(pool); // the turn is still on a, for its second call
+
+    expect(order).toEqual(['a', 'b', 'a']);
+  });
+
+  it('hands the turn to the next account when one hits a rate limit mid-batch', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const order: string[] = [];
+      let first = true;
+      const a = fakeAccount('a', () => {
+        if (!first) return ok;
+        first = false;
+        return [{ type: 'error', message: 'Messages too frequent.', code: 'upstream_rate_limit', possiblySent: true }];
+      });
+      const pool = poolOf([a, fakeAccount('b')], 3, { onAcquire: member => order.push(member.name) });
+
+      await drain(pool); // a takes the call, is rate limited, b serves it
+      vi.setSystemTime(Date.now() + 5_001); // a's cooldown ends
+      await drain(pool); // the turn is b's now
+      await drain(pool); // and b keeps it
+      await drain(pool); // a is back, with a fresh batch
+      await drain(pool);
+      await drain(pool);
+
+      expect(order).toEqual(['a', 'b', 'b', 'b', 'a', 'a', 'a']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reset the batch when an account hits a challenge', async () => {
+    const order: string[] = [];
+    let served = 0;
+    const a = fakeAccount('a', () => {
+      served++;
+      return served === 2
+        ? [{ type: 'error', message: 'captcha', code: 'challenge_required', possiblySent: true }]
+        : ok;
+    });
+    const pool = poolOf([a, fakeAccount('b')], 3, { onAcquire: member => order.push(member.name) });
+
+    await drain(pool); // a, first of its batch
+    await drain(pool); // a challenges; b takes the message
+    await drain(pool); // a, third of its batch
+    await drain(pool); // the turn is b's
+
+    expect(order).toEqual(['a', 'a', 'b', 'a', 'b']);
+  });
+
+  it('keeps the only account serving its whole batch', async () => {
+    const a = fakeAccount('a');
+    const pool = poolOf([a], 2);
+
+    for (let i = 0; i < 3; i++) await drain(pool);
+
+    expect(a.runs).toHaveLength(3);
+  });
+});
+
 describe('ProviderPool callbacks', () => {
   it('reports every attempted account as acquired and released, even across a refusal', async () => {
     const events: string[] = [];
@@ -159,6 +253,41 @@ describe('ProviderPool peek', () => {
 
     await drain(pool);
     expect((await pool.peekNext())?.name).toBe('b');
+  });
+
+  it('keeps peeking at the account in turn until its batch is done', async () => {
+    const pool = poolOf([fakeAccount('a'), fakeAccount('b')], 2);
+
+    expect((await pool.peekNext())?.name).toBe('a');
+    await drain(pool);
+    expect((await pool.peekNext())?.name).toBe('a');
+    await drain(pool);
+    expect((await pool.peekNext())?.name).toBe('b');
+  });
+
+  it('peeks the next account while the last call of a batch is streaming', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    const a = fakeAccount('a');
+    const aChat = a.provider.chat;
+    a.provider.chat = async function* (req: any) {
+      if (++calls === 2) await gate;
+      yield* aChat(req);
+    };
+    let acquired!: () => void;
+    const lastAcquired = new Promise<void>(resolve => { acquired = resolve; });
+    let aCalls = 0;
+    const pool = poolOf([a, fakeAccount('b')], 2, {
+      onAcquire: member => { if (member.name === 'a' && ++aCalls === 2) acquired(); },
+    });
+
+    await drain(pool); // a's first call
+    const held = drain(pool); // a's last call: the turn moves to b while it streams
+    await lastAcquired;
+    expect((await pool.peekNext())?.name).toBe('b');
+    release();
+    await held;
   });
 
   it('skips an account that cannot authenticate', async () => {

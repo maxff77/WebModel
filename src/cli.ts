@@ -351,6 +351,10 @@ program
         const auth = new AuthStore(stateDir, () => name);
         return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserPageFor(name, origin)) };
       });
+      // Calls each account serves before the turn moves on; 1 is the per-call turn.
+      const rawBatch = process.env.WMB_DEEPSEEK_TURN_BATCH?.trim();
+      const parsedBatch = Number(rawBatch);
+      const batchSize = rawBatch && Number.isFinite(parsedBatch) ? Math.max(1, Math.floor(parsedBatch)) : 15;
       let pool: ProviderPool | undefined;
       if (members.length > 0) {
         pool = new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')), {
@@ -363,11 +367,12 @@ program
             }).catch(() => {});
           },
           onRelease: (member) => liveBrowsers.release(member.name),
-        });
+        }, batchSize);
       }
       registry.register(pool ?? singleDeepSeek);
       deepseekPool = names;
-      console.log(chalk.green('  ✓') + ` DeepSeek accounts in turn: ${names.join(', ') || 'none, the active profile only'}`);
+      const turn = names.length ? `${names.join(', ')} (${batchSize} calls each)` : 'none, the active profile only';
+      console.log(chalk.green('  ✓') + ` DeepSeek accounts in turn: ${turn}`);
       return names;
     };
     if (config.deepseek.profiles.length > 0 && singleDeepSeek) {

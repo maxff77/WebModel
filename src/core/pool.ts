@@ -57,14 +57,16 @@ const log = (line: string) => console.log(`[pool] ${new Date().toISOString()} ${
 const when = (t: number) => Number.isFinite(t) ? new Date(t).toISOString() : 'unknown';
 
 /**
- * One provider's accounts in turn (A, B, A, B…), one call in flight per account, so
- * N accounts serve N calls at once; an extra call waits for the first free account.
- * A call an account refuses before answering moves on to the next account.
+ * One provider's accounts in turn, one call in flight per account, so N accounts
+ * serve N calls at once; an extra call waits for the first free account. Each
+ * account serves up to `batchSize` calls before the turn moves on. A call an
+ * account refuses before answering moves on to the next account.
  */
 export class ProviderPool extends BaseProvider {
   readonly info: ProviderInfo;
   private members: Member[];
   private cursor = 0;
+  private servedInBatch = 0;
   private freed: Array<() => void> = [];
 
   /** `here`: the provider on the active profile, whose login the dashboard shows. */
@@ -73,6 +75,7 @@ export class ProviderPool extends BaseProvider {
     private readonly here?: BaseProvider,
     private readonly onRefusal?: (refusal: PoolRefusal) => void,
     private readonly hooks?: PoolHooks,
+    private readonly batchSize = 1,
   ) {
     super();
     if (members.length === 0) throw new Error('A provider pool needs at least one account.');
@@ -137,21 +140,37 @@ export class ProviderPool extends BaseProvider {
     yield challengeRefusal ?? this.allDown();
   }
 
-  /** First account free from the cursor on, taken busy; the next call starts after it. All busy: waits. */
+  /** The account in turn while it has batch left, else the first free account; all busy: waits. */
   private async next(tried: Set<Member>): Promise<Member | undefined> {
     for (;;) {
       const now = Date.now();
       // Read once: a concurrent call moves the cursor during the awaits below.
       const start = this.cursor;
       let busy = false;
+      const down = new Set<number>();
       for (let i = 0; i < this.members.length; i++) {
         const index = (start + i) % this.members.length;
         const m = this.members[index];
-        if (tried.has(m) || !(await this.free(m, now))) continue;
+        // Free comes first: an account in turn that is out (cooling, muted,
+        // logged out) hands the turn on, even if this call already tried it.
+        if (!(await this.free(m, now))) { down.add(index); continue; }
+        if (tried.has(m)) continue;
         // After the await: a concurrent call may have taken it meanwhile.
         if (m.busy) { busy = true; continue; }
         m.busy = true;
-        this.cursor = index + 1;
+        // Re-read: a concurrent call may have moved the turn during the awaits.
+        const owner = this.cursor;
+        if (index === owner) {
+          // The account in turn serves its batch; only it counts these calls.
+          this.servedInBatch++;
+          if (this.advanceIfBatchDone(index)) this.announceTurn(m, this.members[this.cursor]);
+        } else if (down.has(owner)) {
+          // The account in turn is out: this call opens the next account's batch.
+          this.announceTurn(this.members[owner], m, `out after ${this.servedInBatch}`);
+          this.servedInBatch = 1;
+          this.cursor = index;
+          this.advanceIfBatchDone(index);
+        }
         if (m.out) { m.out = false; log(`${m.name} back in turn`); }
         this.hooks?.onAcquire?.(m);
         return m;
@@ -159,6 +178,18 @@ export class ProviderPool extends BaseProvider {
       if (!busy) return undefined;
       await new Promise<void>(wake => this.freed.push(wake));
     }
+  }
+
+  /** The account in turn served its batch: the next call starts a new one. */
+  private advanceIfBatchDone(index: number): boolean {
+    if (this.servedInBatch < this.batchSize) return false;
+    this.servedInBatch = 0;
+    this.cursor = (index + 1) % this.members.length;
+    return true;
+  }
+
+  private announceTurn(from: Member, to: Member, reason = `${this.batchSize}/${this.batchSize}`): void {
+    if (from !== to) log(`${this.info.id}: ${from.name} ${reason} → turn ${to.name}`);
   }
 
   /**
