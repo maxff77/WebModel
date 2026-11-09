@@ -15,7 +15,7 @@ import type { Page } from 'playwright-core';
 
 // DeepSeek scores the whole IP: bursts get CHALLENGE_REQUIRED and then every
 // session is closed (2026-11-04). One gate for all accounts in this process.
-const envNum = (raw: string | undefined, fallback: number): number => {
+export const envNum = (raw: string | undefined, fallback: number): number => {
   const n = Number(raw);
   return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
 };

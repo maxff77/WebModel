@@ -160,11 +160,16 @@ export class ProviderPool extends BaseProvider {
         m.busy = true;
         // Re-read: a concurrent call may have moved the turn during the awaits.
         const owner = this.cursor;
-        if (index === owner) {
+        if (this.batchSize === 1) {
+          // The old per-call turn moved on after every acquisition, overflow included.
+          this.servedInBatch = 1;
+          this.advanceIfBatchDone(index);
+          this.announceTurn(m, this.members[this.cursor]);
+        } else if (index === owner) {
           // The account in turn serves its batch; only it counts these calls.
           this.servedInBatch++;
           if (this.advanceIfBatchDone(index)) this.announceTurn(m, this.members[this.cursor]);
-        } else if (down.has(owner)) {
+        } else if (down.has(owner) || !(await this.free(this.members[owner], Date.now()))) {
           // The account in turn is out: this call opens the next account's batch.
           this.announceTurn(this.members[owner], m, `out after ${this.servedInBatch}`);
           this.servedInBatch = 1;

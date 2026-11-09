@@ -11,7 +11,7 @@ import { LiveBrowsers } from './browser/live.js';
 import { ProfileError, ProfileStore, type ResolvedProfile } from './profiles/store.js';
 import { ClaudeProvider } from './providers/claude/index.js';
 import { ChatGPTProvider } from './providers/chatgpt/index.js';
-import { DeepSeekProvider } from './providers/deepseek/index.js';
+import { DeepSeekProvider, envNum } from './providers/deepseek/index.js';
 import { DEEPSEEK_WEB_BASE_URL } from './providers/deepseek/client.js';
 import { ProviderPool } from './core/pool.js';
 import { createRefusalJournal } from './core/refusal-journal.js';
@@ -352,9 +352,7 @@ program
         return { name, provider: new DeepSeekProvider(auth, undefined, (origin) => browserPageFor(name, origin)) };
       });
       // Calls each account serves before the turn moves on; 1 is the per-call turn.
-      const rawBatch = process.env.WMB_DEEPSEEK_TURN_BATCH?.trim();
-      const parsedBatch = Number(rawBatch);
-      const batchSize = rawBatch && Number.isFinite(parsedBatch) ? Math.max(1, Math.floor(parsedBatch)) : 15;
+      const batchSize = Math.max(1, Math.floor(envNum(process.env.WMB_DEEPSEEK_TURN_BATCH?.trim(), 15)));
       let pool: ProviderPool | undefined;
       if (members.length > 0) {
         pool = new ProviderPool(members, singleDeepSeek, createRefusalJournal(join(stateDir, 'refusals.jsonl')), {
